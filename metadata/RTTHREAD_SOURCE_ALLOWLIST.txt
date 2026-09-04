@@ -1,0 +1,80 @@
+# RT-Thread target-eligible Lely C sources.
+#
+# Paths are relative to the package root. SConscript consumes this file
+# directly, validates every entry and then removes Kconfig-disabled CANopen
+# feature sources. Platform backends and mechanisms excluded by the target
+# architecture must never be added here without an explicit design review.
+
+# libc: string shims remain allowlisted for RT_USING_NANO fallback; normal RT-Thread libc owns them.
+upstream/src/libc/getopt.c
+upstream/src/libc/string.c
+upstream/src/libc/strings.c
+
+# util: no stdio/daemon/C++/fiber implementation in the RT target.
+upstream/src/util/bimap.c
+upstream/src/util/sllist.c
+upstream/src/util/spscring.c
+upstream/src/util/bits.c
+upstream/src/util/bitset.c
+upstream/src/util/cmp.c
+upstream/src/util/config.c
+upstream/src/util/diag.c
+upstream/src/util/dllist.c
+upstream/src/util/endian.c
+upstream/src/util/errnum.c
+upstream/src/util/membuf.c
+upstream/src/util/pheap.c
+upstream/src/util/rbtree.c
+upstream/src/util/stop.c
+upstream/src/util/time.c
+upstream/src/util/ustring.c
+
+# CAN core: no SocketCAN/VCI backend.
+upstream/src/can/buf.c
+upstream/src/can/msg.c
+upstream/src/can/net.c
+
+# CANopen core and target-selectable services. Runtime DCF/Gateway/WTM are out.
+upstream/src/co/crc.c
+upstream/src/co/csdo.c
+upstream/src/co/dev.c
+upstream/src/co/emcy.c
+upstream/src/co/lss.c
+upstream/src/co/nmt.c
+upstream/src/co/nmt_boot.c
+upstream/src/co/nmt_cfg.c
+upstream/src/co/nmt_hb.c
+upstream/src/co/nmt_srv.c
+upstream/src/co/obj.c
+upstream/src/co/pdo.c
+upstream/src/co/rpdo.c
+upstream/src/co/sdev.c
+upstream/src/co/sdo.c
+upstream/src/co/ssdo.c
+upstream/src/co/sync.c
+upstream/src/co/time.c
+upstream/src/co/tpdo.c
+upstream/src/co/type.c
+upstream/src/co/val.c
+
+# EV runtime: one ev_loop executor domain; no fiber/strand/thrd_loop.
+upstream/src/ev/exec.c
+upstream/src/ev/future.c
+upstream/src/ev/loop.c
+upstream/src/ev/poll.c
+upstream/src/ev/std_exec.c
+upstream/src/ev/task.c
+
+# IO2 runtime: user CAN/timer + io_can_net; no system clock/can_rt/vcan/host backends.
+upstream/src/io2/can/msg.c
+upstream/src/io2/sys/io.c
+upstream/src/io2/user/can.c
+upstream/src/io2/user/timer.c
+upstream/src/io2/can.c
+upstream/src/io2/can_net.c
+upstream/src/io2/clock.c
+upstream/src/io2/ctx.c
+upstream/src/io2/dev.c
+upstream/src/io2/sigset.c
+upstream/src/io2/timer.c
+upstream/src/io2/tqueue.c

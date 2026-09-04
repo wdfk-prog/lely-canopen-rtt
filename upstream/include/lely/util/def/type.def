@@ -1,0 +1,44 @@
+// Boolean truth value:
+#ifdef __cplusplus
+LELY_UTIL_DEFINE_TYPE(bool, bool)
+#else
+LELY_UTIL_DEFINE_TYPE(bool, _Bool)
+#endif
+// Integers:
+LELY_UTIL_DEFINE_TYPE(char, char)
+LELY_UTIL_DEFINE_TYPE(schar, signed char)
+LELY_UTIL_DEFINE_TYPE(uchar, unsigned char)
+LELY_UTIL_DEFINE_TYPE(shrt, short)
+LELY_UTIL_DEFINE_TYPE(ushrt, unsigned short)
+LELY_UTIL_DEFINE_TYPE(int, int)
+LELY_UTIL_DEFINE_TYPE(uint, unsigned int)
+LELY_UTIL_DEFINE_TYPE(long, long)
+LELY_UTIL_DEFINE_TYPE(ulong, unsigned long)
+LELY_UTIL_DEFINE_TYPE(llong, long long)
+LELY_UTIL_DEFINE_TYPE(ullong, unsigned long long)
+// Floating-point numbers:
+LELY_UTIL_DEFINE_TYPE(flt, float)
+LELY_UTIL_DEFINE_TYPE(dbl, double)
+LELY_UTIL_DEFINE_TYPE(ldbl, long double)
+// From stddef.h:
+LELY_UTIL_DEFINE_TYPE(ptrdiff, ptrdiff_t)
+LELY_UTIL_DEFINE_TYPE(size, size_t)
+LELY_UTIL_DEFINE_TYPE(wchar, wchar_t)
+// From stdint.h:
+LELY_UTIL_DEFINE_TYPE(int8, int_least8_t)
+LELY_UTIL_DEFINE_TYPE(uint8, uint_least8_t)
+LELY_UTIL_DEFINE_TYPE(int16, int_least16_t)
+LELY_UTIL_DEFINE_TYPE(uint16, uint_least16_t)
+LELY_UTIL_DEFINE_TYPE(int32, int_least32_t)
+LELY_UTIL_DEFINE_TYPE(uint32, uint_least32_t)
+LELY_UTIL_DEFINE_TYPE(int64, int_least64_t)
+LELY_UTIL_DEFINE_TYPE(uint64, uint_least64_t)
+LELY_UTIL_DEFINE_TYPE(intptr, intptr_t)
+LELY_UTIL_DEFINE_TYPE(uintptr, uintptr_t)
+LELY_UTIL_DEFINE_TYPE(intmax, intmax_t)
+LELY_UTIL_DEFINE_TYPE(uintmax, uintmax_t)
+// From uchar.h:
+LELY_UTIL_DEFINE_TYPE(char16, char16_t)
+LELY_UTIL_DEFINE_TYPE(char32, char32_t)
+// From wchar.h:
+LELY_UTIL_DEFINE_TYPE(wint, wint_t)

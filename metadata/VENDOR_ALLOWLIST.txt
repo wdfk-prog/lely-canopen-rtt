@@ -1,0 +1,18 @@
+# Paths are relative to an upstream lely-core checkout.
+# A trailing slash marks a directory tree. This file is consumed directly by
+# tools/update_lely.sh and tools/check_vendor.sh.
+include/lely/features.h
+include/lely/libc/
+include/lely/util/
+include/lely/can/
+include/lely/co/
+include/lely/ev/
+include/lely/io2/
+src/libc/
+src/util/
+src/can/
+src/co/
+src/ev/
+src/io2/
+LICENSE
+NOTICE
