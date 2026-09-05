@@ -89,6 +89,14 @@ if GetDepend('PKG_USING_LELY'):
     # about whether the lely_rtt_log_* definitions must exist.
     if GetDepend('PKG_LELY_APP_AUTO_INIT'):
         src.append('port/rtthread/src/auto_init.c')
+    if GetDepend('PKG_LELY_USING_MASTER_COMMAND'):
+        src.append('port/rtthread/src/master_command.c')
+    if GetDepend('PKG_LELY_USING_MASTER_SDO'):
+        src.append('port/rtthread/src/master_sdo.c')
+    if GetDepend('PKG_LELY_USING_MSH'):
+        src.append('port/rtthread/src/msh.c')
+    if GetDepend('PKG_LELY_EXAMPLE_MASTER_NODE1'):
+        src.append('examples/master_node1/master_sdev.c')
     _validate_target_boundary(src)
 
     # The normal RT-Thread libc builds cstring.c, which already owns the
@@ -122,6 +130,8 @@ CPPPATH = [
     os.path.join(cwd, 'port', 'rtthread'),
     os.path.join(cwd, 'upstream', 'include'),
 ]
+if GetDepend('PKG_LELY_EXAMPLE_MASTER_NODE1'):
+    CPPPATH.append(os.path.join(cwd, 'examples', 'master_node1'))
 # CPPPATH is intentionally non-local: RT-Thread's DefineGroup() propagates it to
 # later application sources, so generated device_sdev.c and application code see
 # the same lely/features.h wrapper and therefore the same ABI-affecting macros.

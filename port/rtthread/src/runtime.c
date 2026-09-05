@@ -4,6 +4,9 @@
  * Change Logs:
  * Date           Author            Notes
  * 2026-09-03     wdfk-prog         first version
+ * 2026-09-04     wdfk-prog         add owner CANopen node and command ingress
+ * 2026-09-05     wdfk-prog         correct B4 role to a local NMT Master
+ * 2026-09-05     wdfk-prog         integrate Master command and SDO ingress
  */
 
 /**
@@ -48,6 +51,287 @@ lely_rtt_latch_error(struct lely_rtt_runtime *runtime, rt_err_t err)
 {
     if (runtime && err != RT_EOK && runtime->runtime_error == RT_EOK)
         runtime->runtime_error = err;
+}
+
+
+#if defined(PKG_LELY_USING_MASTER_COMMAND)
+/** @brief Low-rate fallback that bounds a lost Master-command wakeup. */
+#define LELY_RTT_COMMAND_SAFETY_POLL_MS 1000u
+#endif /* defined(PKG_LELY_USING_MASTER_COMMAND) */
+
+/** @brief Packed remote-state current-state field mask. */
+#define LELY_RTT_REMOTE_STATE_CURRENT_MASK 0x000000ffu
+/** @brief Packed remote-state last-observed-state field shift. */
+#define LELY_RTT_REMOTE_STATE_LAST_SHIFT 8u
+/** @brief Packed remote-state heartbeat-timeout flag. */
+#define LELY_RTT_REMOTE_STATE_TIMEOUT 0x00010000u
+/** @brief Packed boot-result valid flag. */
+#define LELY_RTT_REMOTE_BOOT_VALID 0x00010000u
+/** @brief Packed boot-result error-status field shift. */
+#define LELY_RTT_REMOTE_BOOT_ERROR_SHIFT 8u
+
+/**
+ * @brief Pack one remote NMT state snapshot into an atomic word.
+ * @param current State currently published to readers.
+ * @param last Last state observed from a state indication.
+ * @param timed_out RT_TRUE while heartbeat monitoring reports a timeout.
+ * @return Packed snapshot value.
+ */
+static rt_atomic_t
+lely_rtt_remote_state_pack(rt_uint8_t current, rt_uint8_t last,
+        rt_bool_t timed_out)
+{
+    rt_uint32_t value = (rt_uint32_t)current
+            | ((rt_uint32_t)last << LELY_RTT_REMOTE_STATE_LAST_SHIFT);
+
+    if (timed_out)
+        value |= LELY_RTT_REMOTE_STATE_TIMEOUT;
+    return (rt_atomic_t)value;
+}
+
+/**
+ * @brief Reset all application-visible CANopen snapshots for a new owner run.
+ * @param runtime Runtime instance.
+ */
+static void
+lely_rtt_master_snapshots_reset(struct lely_rtt_runtime *runtime)
+{
+    rt_uint16_t id;
+
+    if (!runtime)
+        return;
+
+    rt_atomic_store(&runtime->local_node_id, 0);
+    rt_atomic_store(&runtime->local_nmt_state,
+            LELY_RTT_NMT_STATE_UNAVAILABLE);
+    for (id = 0; id <= CO_NUM_NODES; id++) {
+        rt_atomic_store(&runtime->remote_nmt_state[id],
+                lely_rtt_remote_state_pack(LELY_RTT_NMT_STATE_UNAVAILABLE,
+                        LELY_RTT_NMT_STATE_UNAVAILABLE, RT_FALSE));
+        rt_atomic_store(&runtime->remote_boot_result[id], 0);
+    }
+}
+
+/**
+ * @brief Preserve Lely state processing and publish local/remote state snapshots.
+ *
+ * The callback executes only in the owner thread. co_nmt_set_st_ind() replaces
+ * Lely's default handler, so this wrapper always chains through co_nmt_on_st()
+ * before publishing snapshots. For a remote Boot-up, an application-owned
+ * default CSDO is retired immediately before that call so Lely NMT boot can
+ * create its own default CSDO without a duplicate receiver.
+ *
+ * @param nmt Local Master NMT service.
+ * @param id Node-ID reported by the NMT service.
+ * @param st New NMT state.
+ * @param data Runtime instance owning the NMT service.
+ */
+static void
+lely_rtt_master_state_ind(co_nmt_t *nmt, co_unsigned8_t id,
+        co_unsigned8_t st, void *data)
+{
+    struct lely_rtt_runtime *runtime = data;
+    const rt_uint8_t state = st & ~CO_NMT_ST_TOGGLE;
+
+    if (!nmt)
+        return;
+
+#if defined(PKG_LELY_USING_MASTER_SDO)
+    /*
+     * co_nmt_on_st() can synchronously start NMT boot on remote Boot-up.
+     * M2 therefore performs one narrow pre-chain arbitration step: retire only
+     * the application-owned default CSDO before Lely creates its own default
+     * CSDO on the same CiA 301 response COB-ID. This does not process or publish
+     * the NMT state; co_nmt_on_st() remains the NMT state-machine handler below.
+     */
+    if (runtime && id && id <= CO_NUM_NODES
+            && id != co_nmt_get_id(nmt) && state == CO_NMT_ST_BOOTUP)
+        lely_rtt_master_sdo_before_boot(runtime, id);
+#endif /* defined(PKG_LELY_USING_MASTER_SDO) */
+
+    co_nmt_on_st(nmt, id, st);
+
+    if (!runtime)
+        return;
+
+    if (id == co_nmt_get_id(nmt)) {
+        rt_atomic_store(&runtime->local_nmt_state, state);
+        return;
+    }
+    if (!id || id > CO_NUM_NODES)
+        return;
+
+#if defined(PKG_LELY_USING_MASTER_SDO)
+    /* Apply the post-NMT state gate after Lely default processing. */
+    lely_rtt_master_sdo_on_nmt_state(runtime, id, state);
+#endif /* defined(PKG_LELY_USING_MASTER_SDO) */
+
+    rt_atomic_store(&runtime->remote_nmt_state[id],
+            lely_rtt_remote_state_pack(state, state, RT_FALSE));
+    if (state == CO_NMT_ST_BOOTUP)
+        rt_atomic_store(&runtime->remote_boot_result[id], 0);
+}
+
+/**
+ * @brief Preserve Lely heartbeat handling and publish timeout/recovery state.
+ *
+ * A timeout makes the public remote-state snapshot temporarily unavailable.
+ * The last state observed by lely_rtt_master_state_ind() is retained in the
+ * same atomic word and restored when heartbeat monitoring reports recovery.
+ * No Lely object is exposed to the application thread.
+ *
+ * @param nmt Local Master NMT service.
+ * @param id Remote Node-ID.
+ * @param state Heartbeat event occurrence/resolution state.
+ * @param reason Heartbeat event reason.
+ * @param data Runtime instance owning the NMT service.
+ */
+static void
+lely_rtt_master_hb_ind(co_nmt_t *nmt, co_unsigned8_t id, int state,
+        int reason, void *data)
+{
+    struct lely_rtt_runtime *runtime = data;
+    rt_uint32_t snapshot;
+    rt_uint8_t last;
+
+    if (!nmt)
+        return;
+
+    co_nmt_on_hb(nmt, id, state, reason);
+
+    if (!runtime || !id || id > CO_NUM_NODES
+            || reason != CO_NMT_EC_TIMEOUT)
+        return;
+
+    snapshot = (rt_uint32_t)rt_atomic_load(&runtime->remote_nmt_state[id]);
+    last = (rt_uint8_t)(snapshot >> LELY_RTT_REMOTE_STATE_LAST_SHIFT);
+
+    if (state == CO_NMT_EC_OCCURRED) {
+        rt_atomic_store(&runtime->remote_nmt_state[id],
+                lely_rtt_remote_state_pack(LELY_RTT_NMT_STATE_UNAVAILABLE,
+                        last, RT_TRUE));
+    } else if (state == CO_NMT_EC_RESOLVED
+            && (snapshot & LELY_RTT_REMOTE_STATE_TIMEOUT)) {
+        rt_atomic_store(&runtime->remote_nmt_state[id],
+                lely_rtt_remote_state_pack(last, last, RT_FALSE));
+    }
+}
+
+#if !LELY_NO_CO_NMT_BOOT
+/**
+ * @brief Publish the completed NMT boot result for a remote slave.
+ * @param nmt Local Master NMT service.
+ * @param id Remote Node-ID.
+ * @param st State reported by the completed boot process.
+ * @param es Lely boot error status, or 0 on success.
+ * @param data Runtime instance owning the NMT service.
+ */
+static void
+lely_rtt_master_boot_ind(co_nmt_t *nmt, co_unsigned8_t id,
+        co_unsigned8_t st, char es, void *data)
+{
+    struct lely_rtt_runtime *runtime = data;
+    rt_uint32_t result;
+
+    (void)nmt;
+    if (!runtime || !id || id > CO_NUM_NODES)
+        return;
+
+#if defined(PKG_LELY_USING_MASTER_SDO)
+    lely_rtt_master_sdo_on_boot_complete(runtime, id,
+            st & ~CO_NMT_ST_TOGGLE);
+#endif /* defined(PKG_LELY_USING_MASTER_SDO) */
+
+    result = LELY_RTT_REMOTE_BOOT_VALID
+            | ((rt_uint32_t)(rt_uint8_t)es << LELY_RTT_REMOTE_BOOT_ERROR_SHIFT)
+            | (rt_uint32_t)(st & ~CO_NMT_ST_TOGGLE);
+    rt_atomic_store(&runtime->remote_boot_result[id], (rt_atomic_t)result);
+}
+#endif /* !LELY_NO_CO_NMT_BOOT */
+
+/**
+ * @brief Create the optional static CANopen Master inside the owner thread.
+ *
+ * The target has LELY_NO_CO_DCF=1, so the local Master object dictionary must
+ * already be a static struct co_sdev generated on the host. Remote Node1 DCF
+ * data belongs to that host generation chain and is never instantiated as the
+ * MCU's local CANopen device.
+ *
+ * After the local reset, co_nmt_is_master() is a hard role guard. A wrong OD
+ * must fail startup rather than silently running the MCU as a CANopen slave.
+ *
+ * @param runtime Runtime instance with a started io_can_net.
+ * @return RT_EOK when no Master is requested or creation succeeds; otherwise
+ *         an RT-Thread error used to abort runtime startup.
+ */
+static rt_err_t
+lely_rtt_master_init(struct lely_rtt_runtime *runtime)
+{
+    if (!runtime || !runtime->master_sdev)
+        return RT_EOK;
+
+    lely_rtt_master_snapshots_reset(runtime);
+
+    runtime->master_dev = co_dev_create_from_sdev(runtime->master_sdev);
+    if (!runtime->master_dev) {
+        LELY_RTT_LOG_E("CANopen Master static device creation failed");
+        return -RT_ERROR;
+    }
+
+    runtime->master_nmt = co_nmt_create(
+            io_can_net_get_net(runtime->can_net), runtime->master_dev);
+    if (!runtime->master_nmt) {
+        LELY_RTT_LOG_E("CANopen Master NMT creation failed");
+        return -RT_ERROR;
+    }
+
+    co_nmt_set_st_ind(runtime->master_nmt,
+            &lely_rtt_master_state_ind, runtime);
+    co_nmt_set_hb_ind(runtime->master_nmt,
+            &lely_rtt_master_hb_ind, runtime);
+#if !LELY_NO_CO_NMT_BOOT
+    co_nmt_set_boot_ind(runtime->master_nmt,
+            &lely_rtt_master_boot_ind, runtime);
+#endif /* !LELY_NO_CO_NMT_BOOT */
+
+    if (co_nmt_cs_ind(runtime->master_nmt, CO_NMT_CS_RESET_NODE) == -1) {
+        LELY_RTT_LOG_E("CANopen Master local reset-node failed");
+        return -RT_ERROR;
+    }
+    if (!co_nmt_is_master(runtime->master_nmt)) {
+        LELY_RTT_LOG_E("configured local CANopen device is not an NMT Master");
+        return -RT_ERROR;
+    }
+
+    rt_atomic_store(&runtime->local_node_id, co_nmt_get_id(runtime->master_nmt));
+    rt_atomic_store(&runtime->local_nmt_state,
+            co_nmt_get_st(runtime->master_nmt) & ~CO_NMT_ST_TOGGLE);
+    LELY_RTT_LOG_I("CANopen Master ready: id=%u state=0x%02x",
+            (unsigned int)co_nmt_get_id(runtime->master_nmt),
+            (unsigned int)co_nmt_get_st(runtime->master_nmt));
+    return RT_EOK;
+}
+
+/**
+ * @brief Destroy the optional local Master before its CAN network disappears.
+ * @param runtime Runtime instance owned by the current owner thread.
+ */
+static void
+lely_rtt_master_fini(struct lely_rtt_runtime *runtime)
+{
+    if (!runtime)
+        return;
+
+    if (runtime->master_nmt) {
+        co_nmt_destroy(runtime->master_nmt);
+        runtime->master_nmt = RT_NULL;
+    }
+    if (runtime->master_dev) {
+        co_dev_destroy(runtime->master_dev);
+        runtime->master_dev = RT_NULL;
+    }
+
+    lely_rtt_master_snapshots_reset(runtime);
 }
 
 /**
@@ -150,9 +434,10 @@ lely_rtt_callbacks_wait_idle(struct lely_rtt_runtime *runtime)
 /**
  * @brief Destroy owner-thread resources in reverse dependency order.
  *
- * External callback admission is closed first; CAN/timer producers are then
- * detached/stopped and the owner waits for already-pinned callback bodies to
- * return without busy-spinning. Only then can Lely objects be released.
+ * Cross-thread command and external callback admission are closed before any
+ * owner-owned CANopen object can disappear. Queued/active application SDO work
+ * is canceled while CAN is still valid; CAN/timer producers are then detached
+ * and already-pinned callbacks are drained before the Master is released.
  *
  * @param runtime Runtime instance owned by the current owner thread.
  */
@@ -163,13 +448,22 @@ lely_rtt_owner_cleanup(struct lely_rtt_runtime *runtime)
         return;
 
     /*
-     * Freeze the external-callback admission boundary before detaching hardware
-     * producers. A callback that raced this transition either holds a ref and
-     * is waited below, or observes quiescing and returns without using runtime.
+     * Close cross-thread producers before owner-owned CANopen objects disappear.
+     * Command posters hold a lifetime pin around queue access, matching the
+     * callback admission pattern used by CAN/timer callbacks.
      */
+#if defined(PKG_LELY_USING_MASTER_COMMAND)
+    lely_rtt_master_command_quiesce_begin(runtime);
+    lely_rtt_master_command_wait_idle(runtime);
+#endif /* defined(PKG_LELY_USING_MASTER_COMMAND) */
     lely_rtt_callbacks_quiesce_begin(runtime);
-    lely_rtt_can_quiesce(runtime);
 
+#if defined(PKG_LELY_USING_MASTER_COMMAND)
+    /* Queued SDO requests are canceled and active Client-SDOs stop before CAN. */
+    lely_rtt_master_command_fini(runtime);
+#endif /* defined(PKG_LELY_USING_MASTER_COMMAND) */
+
+    lely_rtt_can_quiesce(runtime);
     if (runtime->deadline_timer_initialized)
         rt_timer_stop(&runtime->deadline_timer);
 
@@ -178,6 +472,10 @@ lely_rtt_owner_cleanup(struct lely_rtt_runtime *runtime)
      * returned. The reference-count drain establishes that lifetime guarantee.
      */
     lely_rtt_callbacks_wait_idle(runtime);
+
+    /* The Master owns CAN receivers/timers attached to can_net, so release it first. */
+    lely_rtt_master_fini(runtime);
+    lely_rtt_drain_loop(runtime);
 
     /* io_ctx_shutdown() may enqueue cancellation/completion work for the loop. */
     if (runtime->ctx)
@@ -257,6 +555,16 @@ lely_rtt_owner_init(struct lely_rtt_runtime *runtime)
 
     io_can_net_start(runtime->can_net);
 
+    err = lely_rtt_master_init(runtime);
+    if (err != RT_EOK)
+        return err;
+
+#if defined(PKG_LELY_USING_MASTER_COMMAND)
+    err = lely_rtt_master_command_init(runtime);
+    if (err != RT_EOK)
+        return err;
+#endif /* defined(PKG_LELY_USING_MASTER_COMMAND) */
+
     /*
      * rt_device_set_rx_indicate() only installs a callback; it does not replay
      * an indication for frames already buffered while CAN/filter setup ran.
@@ -279,10 +587,12 @@ lely_rtt_owner_init(struct lely_rtt_runtime *runtime)
 /**
  * @brief Owner thread entry and only dispatcher allowed to execute Lely work.
  *
- * The work loop intentionally waits forever: RX, timer, CAN-status and STOP
- * are all explicit wake sources, so periodic polling would only waste CPU.
- * Lifecycle callers do not wait forever; start()/stop() use bounded waits for
- * READY/EXIT acknowledgements.
+ * RX, timer, CAN-status and STOP normally wake the owner explicitly. With
+ * Master command ingress enabled, every owner iteration drains one bounded
+ * command batch so unrelated traffic cannot starve an already-enqueued
+ * command after a lost COMMAND wake. The low-rate timed wait only guarantees
+ * progress when the runtime is otherwise completely idle. Lifecycle callers
+ * still use bounded READY/EXIT waits.
  *
  * @param parameter Pointer to struct lely_rtt_runtime.
  */
@@ -292,6 +602,10 @@ lely_rtt_owner_entry(void *parameter)
     struct lely_rtt_runtime *runtime = parameter;
     rt_uint32_t events;
     rt_err_t err;
+#if defined(PKG_LELY_USING_MASTER_COMMAND)
+    const rt_int32_t command_poll_ticks =
+            lely_rtt_timeout_ticks(LELY_RTT_COMMAND_SAFETY_POLL_MS);
+#endif /* defined(PKG_LELY_USING_MASTER_COMMAND) */
 
     runtime->init_result = lely_rtt_owner_init(runtime);
     if (runtime->init_result != RT_EOK) {
@@ -305,13 +619,24 @@ lely_rtt_owner_entry(void *parameter)
     }
 
     runtime->running = RT_TRUE;
+#if defined(PKG_LELY_USING_MASTER_COMMAND)
+    lely_rtt_master_command_admission_open(runtime);
+#endif /* defined(PKG_LELY_USING_MASTER_COMMAND) */
     rt_event_send(&runtime->event, LELY_RTT_EVENT_READY);
 
     for (;;) {
         events = 0;
+#if defined(PKG_LELY_USING_MASTER_COMMAND)
+        err = rt_event_recv(&runtime->event, LELY_RTT_EVENT_OWNER_MASK,
+                RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR,
+                command_poll_ticks, &events);
+        if (err == -RT_ETIMEOUT)
+            err = RT_EOK;
+#else
         err = rt_event_recv(&runtime->event, LELY_RTT_EVENT_OWNER_MASK,
                 RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR,
                 RT_WAITING_FOREVER, &events);
+#endif /* defined(PKG_LELY_USING_MASTER_COMMAND) */
         if (err != RT_EOK) {
             /* A permanent IPC error must terminate instead of busy-looping. */
             LELY_RTT_LOG_E("owner event receive failed: %d", err);
@@ -328,6 +653,14 @@ lely_rtt_owner_entry(void *parameter)
             lely_rtt_can_process_status(runtime);
         if (events & LELY_RTT_EVENT_TIMER_DUE)
             lely_rtt_timer_advance(runtime);
+#if defined(PKG_LELY_USING_MASTER_COMMAND)
+        /*
+         * Drain one bounded batch on every owner iteration. COMMAND still gives
+         * immediate wakeup, while unrelated RX/timer/status traffic can no
+         * longer starve a queued command whose wake event was lost.
+         */
+        lely_rtt_master_command_dispatch(runtime);
+#endif /* defined(PKG_LELY_USING_MASTER_COMMAND) */
 
         /*
          * BSPs without status indications are sampled opportunistically after
@@ -338,6 +671,9 @@ lely_rtt_owner_entry(void *parameter)
             lely_rtt_can_process_status(runtime);
 
         lely_rtt_drain_loop(runtime);
+#if defined(PKG_LELY_USING_MASTER_SDO)
+        lely_rtt_master_sdo_reap(runtime);
+#endif /* defined(PKG_LELY_USING_MASTER_SDO) */
     }
 
     LELY_RTT_LOG_I("owner stopping");
@@ -436,8 +772,27 @@ lely_rtt_runtime_create(const struct lely_rtt_runtime_config *config)
     }
 
     runtime->event_initialized = RT_TRUE;
+    lely_rtt_master_snapshots_reset(runtime);
+
     LELY_RTT_LOG_D("runtime created: can=%s", runtime->config.can_name);
     return runtime;
+}
+
+/**
+ * @brief Bind one static local Master device before owner startup.
+ */
+rt_err_t
+lely_rtt_runtime_configure_master(lely_rtt_runtime_t *runtime,
+        const struct co_sdev *master_sdev)
+{
+    if (!runtime || !runtime->event_initialized || runtime->owner_thread
+            || !master_sdev)
+        return -RT_EINVAL;
+    if (runtime->master_sdev)
+        return -RT_EBUSY;
+
+    runtime->master_sdev = master_sdev;
+    return RT_EOK;
 }
 
 /**
@@ -459,7 +814,10 @@ lely_rtt_runtime_start(lely_rtt_runtime_t *runtime)
     }
 
     lely_rtt_clear_events(runtime);
-
+    lely_rtt_master_snapshots_reset(runtime);
+#if defined(PKG_LELY_USING_MASTER_COMMAND)
+    lely_rtt_master_command_prepare(runtime);
+#endif /* defined(PKG_LELY_USING_MASTER_COMMAND) */
     runtime->init_result = -RT_ERROR;
     runtime->runtime_error = RT_EOK;
     runtime->running = RT_FALSE;
@@ -490,6 +848,9 @@ lely_rtt_runtime_start(lely_rtt_runtime_t *runtime)
          * init enters cleanup immediately; ownership stays non-NULL until EXIT.
          */
         LELY_RTT_LOG_E("runtime READY wait failed: %d", err);
+#if defined(PKG_LELY_USING_MASTER_COMMAND)
+        lely_rtt_master_command_quiesce_begin(runtime);
+#endif /* defined(PKG_LELY_USING_MASTER_COMMAND) */
         rt_event_send(&runtime->event, LELY_RTT_EVENT_STOP);
         return err;
     }
@@ -539,6 +900,9 @@ lely_rtt_runtime_stop(lely_rtt_runtime_t *runtime)
         return -RT_EINVAL;
     }
 
+#if defined(PKG_LELY_USING_MASTER_COMMAND)
+    lely_rtt_master_command_quiesce_begin(runtime);
+#endif /* defined(PKG_LELY_USING_MASTER_COMMAND) */
     err = rt_event_send(&runtime->event, LELY_RTT_EVENT_STOP);
     if (err != RT_EOK) {
         LELY_RTT_LOG_E("runtime STOP event send failed: %d", err);
@@ -568,6 +932,80 @@ lely_rtt_runtime_stop(lely_rtt_runtime_t *runtime)
 }
 
 /**
+ * @brief Read the owner-published local Master NMT state cache.
+ */
+rt_err_t
+lely_rtt_runtime_get_local_nmt_state(lely_rtt_runtime_t *runtime,
+        rt_uint8_t *state)
+{
+    rt_atomic_t value;
+
+    if (!runtime || !state)
+        return -RT_EINVAL;
+
+    value = rt_atomic_load(&runtime->local_nmt_state);
+    if (value == LELY_RTT_NMT_STATE_UNAVAILABLE)
+        return -RT_EBUSY;
+
+    *state = (rt_uint8_t)value;
+    return RT_EOK;
+}
+
+/**
+ * @brief Preserve the pre-B4 state getter as an alias to the local Master state.
+ */
+rt_err_t
+lely_rtt_runtime_get_nmt_state(lely_rtt_runtime_t *runtime,
+        rt_uint8_t *state)
+{
+    return lely_rtt_runtime_get_local_nmt_state(runtime, state);
+}
+
+/**
+ * @brief Read one owner-published remote NMT state snapshot.
+ */
+rt_err_t
+lely_rtt_runtime_get_remote_nmt_state(lely_rtt_runtime_t *runtime,
+        rt_uint8_t node_id, rt_uint8_t *state)
+{
+    rt_uint32_t snapshot;
+    rt_uint8_t current;
+
+    if (!runtime || !state || !node_id || node_id > CO_NUM_NODES)
+        return -RT_EINVAL;
+
+    snapshot = (rt_uint32_t)rt_atomic_load(&runtime->remote_nmt_state[node_id]);
+    current = (rt_uint8_t)(snapshot & LELY_RTT_REMOTE_STATE_CURRENT_MASK);
+    if (current == LELY_RTT_NMT_STATE_UNAVAILABLE)
+        return -RT_EBUSY;
+
+    *state = current;
+    return RT_EOK;
+}
+
+/**
+ * @brief Read one owner-published completed NMT boot result snapshot.
+ */
+rt_err_t
+lely_rtt_runtime_get_remote_boot_status(lely_rtt_runtime_t *runtime,
+        rt_uint8_t node_id, rt_uint8_t *state, char *error_status)
+{
+    rt_uint32_t result;
+
+    if (!runtime || !state || !error_status || !node_id
+            || node_id > CO_NUM_NODES)
+        return -RT_EINVAL;
+
+    result = (rt_uint32_t)rt_atomic_load(&runtime->remote_boot_result[node_id]);
+    if (!(result & LELY_RTT_REMOTE_BOOT_VALID))
+        return -RT_EBUSY;
+
+    *state = (rt_uint8_t)(result & LELY_RTT_REMOTE_STATE_CURRENT_MASK);
+    *error_status = (char)(rt_uint8_t)(result >> LELY_RTT_REMOTE_BOOT_ERROR_SHIFT);
+    return RT_EOK;
+}
+
+/**
  * @brief Detach the persistent event object and free a fully stopped runtime.
  * @param runtime Stopped runtime instance; RT_NULL is accepted.
  */
@@ -580,6 +1018,8 @@ lely_rtt_runtime_destroy(lely_rtt_runtime_t *runtime)
         LELY_RTT_LOG_W("runtime destroy ignored while owner is active");
         return;
     }
+
+    runtime->master_sdev = RT_NULL;
 
     if (runtime->event_initialized) {
         rt_event_detach(&runtime->event);

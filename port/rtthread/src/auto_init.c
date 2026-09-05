@@ -4,6 +4,8 @@
  * Change Logs:
  * Date           Author            Notes
  * 2026-09-04     wdfk-prog         first version
+ * 2026-09-04     wdfk-prog         bind optional static Node1 before runtime start
+ * 2026-09-05     wdfk-prog         bind generated local Master instead of Node1
  */
 
 /**
@@ -15,17 +17,31 @@
 
 #include "internal.h"
 
+#if defined(PKG_LELY_EXAMPLE_MASTER_NODE1)
+#include "master_sdev.h"
+#endif /* defined(PKG_LELY_EXAMPLE_MASTER_NODE1) */
+
 #if defined(PKG_LELY_APP_AUTO_INIT)
 
 /** @brief Default runtime created by the RT-Thread application init hook. */
 static lely_rtt_runtime_t *lely_rtt_auto_runtime;
 
+/** @brief Default runtime published only after a successful start. */
+static lely_rtt_runtime_t *lely_rtt_auto_ready_runtime;
+
+lely_rtt_runtime_t *
+lely_rtt_runtime_get_default(void)
+{
+    return lely_rtt_auto_ready_runtime;
+}
+
 /**
  * @brief Fill the default runtime configuration from Kconfig.
  *
- * B3 deliberately configures only the runtime/CAN transport here. A concrete
- * CANopen node needs product DCF/OD data and a co_* lifecycle, so no Node-ID is
- * invented by this auto-init layer.
+ * The base configuration remains the B3 transport contract. When the built-in
+ * Master + remote Node1 example is selected, lely_rtt_auto_init() binds the
+ * generated local Master co_sdev before start; all co_* construction still
+ * occurs later in the owner thread.
  *
  * @param config Output runtime configuration.
  */
@@ -86,12 +102,24 @@ lely_rtt_auto_init(void)
     if (lely_rtt_auto_runtime)
         return RT_EOK;
 
+    lely_rtt_auto_ready_runtime = RT_NULL;
     lely_rtt_auto_config_init(&config);
     lely_rtt_auto_runtime = lely_rtt_runtime_create(&config);
     if (!lely_rtt_auto_runtime) {
         LELY_RTT_LOG_E("auto init create failed");
         return -RT_ERROR;
     }
+
+#if defined(PKG_LELY_EXAMPLE_MASTER_NODE1)
+    err = lely_rtt_runtime_configure_master(lely_rtt_auto_runtime,
+            &master_sdev);
+    if (err != RT_EOK) {
+        LELY_RTT_LOG_E("auto init Master configuration failed: %d", err);
+        lely_rtt_runtime_destroy(lely_rtt_auto_runtime);
+        lely_rtt_auto_runtime = RT_NULL;
+        return err;
+    }
+#endif /* defined(PKG_LELY_EXAMPLE_MASTER_NODE1) */
 
     err = lely_rtt_runtime_start(lely_rtt_auto_runtime);
     if (err != RT_EOK) {
@@ -114,6 +142,7 @@ lely_rtt_auto_init(void)
         return err;
     }
 
+    lely_rtt_auto_ready_runtime = lely_rtt_auto_runtime;
     LELY_RTT_LOG_I("auto init started: can=%s bitrate=%u",
             config.can_name, (unsigned int)config.can_bitrate);
     return RT_EOK;
