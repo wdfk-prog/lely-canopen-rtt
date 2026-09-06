@@ -1,0 +1,8 @@
+FORMAT_VERSION=1
+GENERATOR=dcf2c
+INPUT=examples/node1/node1.dcf
+VARIABLE=node1_sdev
+OUTPUT=examples/node1/node1_sdev.c
+WRAPPER=tools/gen_node1_sdev.sh
+UPSTREAM_EXACT_REF=UNRESOLVED
+OBSERVED_GITHUB_MIRROR_REF=620d1858eb8520dbc3dc5e1a7314565becd54199
