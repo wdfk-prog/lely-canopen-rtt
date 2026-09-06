@@ -257,12 +257,14 @@ config PKG_LELY_USING_MASTER_NMT_CFG
         caller waits for a terminal result while all Lely NMT/CSDO objects
         remain owner-thread-only. Manual configuration arbitrates the CiA 301
         predefined SDO channel with application SDO transactions. A useful
-        request requires embedded 0x1F22 concise DCF data or an
-        owner-installed Lely cfg_ind callback. The 0x1F8A restore/reset path is
-        intentionally rejected because it conflicts with the current Master's
-        Boot-up/NMT-boot ownership. The checked-in Master example has no
-        supported configuration work, so the bridge fails closed with
-        -RT_ENOSYS instead of reporting a no-op configuration as success.
+        request requires embedded 0x1F22 concise DCF data, a pre-start
+        application concise DCF registered through the RT-Thread bridge, or an
+        owner-installed external Lely cfg_ind callback. The copied application
+        DCF is consumed only by explicit manual configuration, not automatic
+        NMT boot. The 0x1F8A restore/reset path is intentionally rejected
+        because it conflicts with the current Master's Boot-up/NMT-boot
+        ownership. With the Master+Node1 example enabled, Node1 has a real
+        application DCF that rewrites heartbeat producer 0x1017:00 to 1000 ms.
 
 config PKG_LELY_USING_LOCAL_OD
     bool "Enable owner-safe local application OD access"

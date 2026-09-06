@@ -12,6 +12,7 @@
  * 2026-09-06     wdfk-prog         bind B6 EMCY bridge to NMT service lifetime
  * 2026-09-06     wdfk-prog         sync passive timer clock before owner work
  * 2026-09-06     wdfk-prog         preserve synchronous boot completion snapshot
+ * 2026-09-06     wdfk-prog         bind and release B8 manual CFG application data
  */
 
 /**
@@ -332,6 +333,17 @@ lely_rtt_master_init(struct lely_rtt_runtime *runtime)
     co_nmt_set_boot_ind(runtime->master_nmt,
             &lely_rtt_master_boot_ind, runtime);
 #endif /* !LELY_NO_CO_NMT_BOOT */
+#if defined(PKG_LELY_USING_MASTER_NMT_CFG)
+    {
+        /* Bind before local reset can launch any Lely configuration activity. */
+        rt_err_t err = lely_rtt_master_cfg_bind(runtime);
+
+        if (err != RT_EOK) {
+            LELY_RTT_LOG_E("NMT configuration bridge bind failed: %d", err);
+            return err;
+        }
+    }
+#endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
 
     if (co_nmt_cs_ind(runtime->master_nmt, CO_NMT_CS_RESET_NODE) == -1) {
         LELY_RTT_LOG_E("CANopen Master local reset-node failed");
@@ -765,6 +777,9 @@ lely_rtt_owner_entry(void *parameter)
             lely_rtt_can_process_status(runtime);
 
         lely_rtt_drain_loop(runtime);
+#if defined(PKG_LELY_USING_MASTER_NMT_CFG)
+        lely_rtt_master_cfg_reap(runtime);
+#endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
 #if defined(PKG_LELY_USING_MASTER_SDO)
         lely_rtt_master_sdo_reap(runtime);
 #endif /* defined(PKG_LELY_USING_MASTER_SDO) */
@@ -1114,6 +1129,10 @@ lely_rtt_runtime_destroy(lely_rtt_runtime_t *runtime)
     }
 
     runtime->master_sdev = RT_NULL;
+#if defined(PKG_LELY_USING_MASTER_NMT_CFG)
+    /* owner_thread == NULL is the final callback barrier for copied sources. */
+    lely_rtt_master_cfg_sources_fini(runtime);
+#endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
 
     if (runtime->event_initialized) {
         rt_event_detach(&runtime->event);

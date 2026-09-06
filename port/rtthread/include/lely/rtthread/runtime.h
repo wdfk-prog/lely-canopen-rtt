@@ -13,6 +13,7 @@
  * 2026-09-06     wdfk-prog         document snapshot reader scheduling contract
  * 2026-09-06     wdfk-prog         add B5.2 TPDO and B6 EMCY application APIs
  * 2026-09-06     wdfk-prog         document synchronous API thread-context contract
+ * 2026-09-06     wdfk-prog         add B8 manual CFG data and diagnostic APIs
  */
 
 /**
@@ -77,6 +78,32 @@ struct lely_rtt_nmt_cfg_result {
     enum lely_rtt_nmt_cfg_completion_status status; /**< Terminal classification. */
     rt_err_t local_error; /**< Local dispatch error for LOCAL_ERROR. */
     rt_uint32_t abort_code; /**< SDO abort code, or zero when absent. */
+};
+
+/** @brief Last owner/Lely stage reached by a manual NMT configuration request. */
+enum lely_rtt_nmt_cfg_stage {
+    LELY_RTT_NMT_CFG_STAGE_QUEUED = 0,
+    LELY_RTT_NMT_CFG_STAGE_OWNER_PRECHECK,
+    LELY_RTT_NMT_CFG_STAGE_LELY_SEQUENCE,
+    LELY_RTT_NMT_CFG_STAGE_APPLICATION_DCF,
+    LELY_RTT_NMT_CFG_STAGE_COMPLETE,
+};
+
+/** Embedded 0x1F22 data is available in the local Master object dictionary. */
+#define LELY_RTT_NMT_CFG_SOURCE_OBJECT_1F22       (1u << 0)
+/** A copied application concise DCF is registered for this remote node. */
+#define LELY_RTT_NMT_CFG_SOURCE_APPLICATION_DCF   (1u << 1)
+/** A non-RT-Thread Lely cfg_ind callback is installed by the owner. */
+#define LELY_RTT_NMT_CFG_SOURCE_EXTERNAL_CFG_IND  (1u << 2)
+
+/** @brief Extended diagnostic returned by lely_rtt_runtime_nmt_configure_ex(). */
+struct lely_rtt_nmt_cfg_diagnostic {
+    enum lely_rtt_nmt_cfg_stage stage; /**< Last stage reached before completion/failure. */
+    rt_uint8_t source_flags; /**< Bitwise OR of LELY_RTT_NMT_CFG_SOURCE_* flags. */
+    rt_bool_t restore_requested; /**< Non-zero when object 0x1F8A requests restore/reset. */
+    rt_uint32_t application_dcf_entries; /**< Entries in the registered application DCF. */
+    rt_uint16_t last_index; /**< Last/failing application DCF object, or zero. */
+    rt_uint8_t last_subindex; /**< Last/failing application DCF sub-index. */
 };
 #endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
 
@@ -294,6 +321,32 @@ lely_rtt_runtime_t *lely_rtt_runtime_create(
 rt_err_t lely_rtt_runtime_configure_master(lely_rtt_runtime_t *runtime,
         const struct co_sdev *master_sdev);
 
+#if defined(PKG_LELY_USING_MASTER_NMT_CFG)
+/**
+ * @brief Register one application concise DCF for manual remote reconfiguration.
+ *
+ * The buffer uses the CiA concise-DCF binary layout consumed by
+ * co_csdo_dn_dcf_req(): a little-endian 32-bit entry count followed by entries
+ * containing index, sub-index, little-endian 32-bit byte length and raw value.
+ * The runtime validates the framing and copies the complete buffer before this
+ * function returns, so caller storage can be released immediately. Registration
+ * is startup-only and one source is accepted per remote Node-ID.
+ *
+ * The registered DCF is intentionally scoped to
+ * lely_rtt_runtime_nmt_configure[_ex](). Automatic NMT boot/configuration
+ * requests do not consume this application source.
+ *
+ * @param runtime Stopped runtime handle.
+ * @param node_id Remote Node-ID in the range 1..127.
+ * @param data Concise DCF bytes copied by this call.
+ * @param size Number of bytes at data.
+ * @return RT_EOK on success, -RT_EINVAL for invalid state/framing, -RT_EBUSY
+ *         when the node already has a source, or -RT_ENOMEM on allocation failure.
+ */
+rt_err_t lely_rtt_runtime_configure_nmt_dcf(lely_rtt_runtime_t *runtime,
+        rt_uint8_t node_id, const void *data, rt_size_t size);
+#endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
+
 /**
  * @brief Start the owner thread and wait for bounded initialization acknowledgement.
  *
@@ -413,8 +466,11 @@ rt_err_t lely_rtt_runtime_post_nmt(lely_rtt_runtime_t *runtime,
  * caller must therefore be a normal non-owner RT-Thread thread. Do not call
  * this API from ISR or scheduler-locked context.
  *
- * A useful request must have embedded concise DCF data at 0x1F22 or an
- * owner-installed Lely cfg_ind callback. Requests that would enter Lely's
+ * A useful request must have embedded concise DCF data at 0x1F22, a copied
+ * application concise DCF registered with lely_rtt_runtime_configure_nmt_dcf(),
+ * or an owner-installed external Lely cfg_ind callback. If both 0x1F22 and the
+ * application DCF are present, Lely applies 0x1F22 first and the RT-Thread
+ * cfg_ind applies the application DCF second. Requests that would enter Lely's
  * 0x1F8A restore/reset path are rejected with LOCAL_ERROR/-RT_ENOSYS because
  * the current Master cannot safely arbitrate that Boot-up handshake with
  * automatic NMT boot. Missing supported work uses the same fail-closed result.
@@ -428,6 +484,25 @@ rt_err_t lely_rtt_runtime_post_nmt(lely_rtt_runtime_t *runtime,
 rt_err_t lely_rtt_runtime_nmt_configure(lely_rtt_runtime_t *runtime,
         rt_uint8_t node_id, rt_uint32_t timeout_ms,
         struct lely_rtt_nmt_cfg_result *result);
+
+/**
+ * @brief Run manual NMT configuration and return stage/source diagnostics.
+ *
+ * This is the diagnostic form of lely_rtt_runtime_nmt_configure(); it preserves
+ * the same owner, timeout, cancellation and result semantics while exposing the
+ * last stage reached and application concise-DCF progress.
+ *
+ * @param runtime Started runtime with a configured local NMT Master.
+ * @param node_id Remote Node-ID in the range 1..127.
+ * @param timeout_ms Configuration/SDO timeout in milliseconds; 1..INT_MAX.
+ * @param result Output terminal result when the function returns RT_EOK.
+ * @param diagnostic Output stage/source diagnostic for the same request.
+ * @return RT_EOK after a terminal result, or an RT-Thread admission/IPC error.
+ */
+rt_err_t lely_rtt_runtime_nmt_configure_ex(lely_rtt_runtime_t *runtime,
+        rt_uint8_t node_id, rt_uint32_t timeout_ms,
+        struct lely_rtt_nmt_cfg_result *result,
+        struct lely_rtt_nmt_cfg_diagnostic *diagnostic);
 #endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
 
 #if defined(PKG_LELY_USING_LOCAL_OD)

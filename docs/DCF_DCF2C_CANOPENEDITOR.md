@@ -224,6 +224,23 @@ Lely 的 `dcfgen` 用于根据 YAML 生成 CANopen Master DCF；本项目使用 
 ```text
 https://opensource.lely.com/canopen/docs/dcf-tools/
 ```
+
+`dcfgen` 还负责 Lely 官方的 concise DCF 生成：当某个 slave 需要配置 SDO（例如 YAML 中的 `sdo:`）时，它会额外输出 `<slave>.bin`，内容就是 Lely `co_csdo_dn_dcf_req()` 可消费的 SDO request 序列。这里不要和 `dcf2c` 混淆：`dcf2c` 的职责是 EDS/DCF -> `const struct co_sdev` C 源码，而不是生成这类 remote configuration `.bin`。
+
+B8 manual CFG 使用独立 Host 入口 `tools\gen_cfg_dcf.py`。脚本不重新实现 CANopen datatype 编码，而是在 staging 目录调用官方 `dcfgen`，只选择指定 slave 的 `.bin`，校验 entry count/index/sub-index/value-size framing，再生成 RT-Thread 可直接编译的 C/H。`dcfgen` 同时生成的 staging `master.dcf` 不会发布，因此不会把 manual-only application DCF 变成 Master OD 的 `0x1F22` 自动启动配置。Master+Node1 示例命令：
+
+```powershell
+.\.venv\Scripts\python.exe .\tools\gen_cfg_dcf.py `
+    --yml .\examples\master_node1\master_cfg.yml `
+    --node node1 `
+    --symbol master_node1_cfg_dcf `
+    --basename master_cfg_dcf `
+    --out-dir .\examples\master_node1 `
+    --expect-entries 1
+```
+
+如果已经单独得到 Lely concise DCF `.bin`，也可以使用 `--bin <file>` 跳过 `dcfgen` 调用，只做 framing 校验与 C/H 封装。
+
 #### 第 4 步：使用通用 `gen_sdev.ps1`
 
 Windows 主入口现在是：

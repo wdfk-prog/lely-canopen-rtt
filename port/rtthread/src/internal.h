@@ -11,6 +11,7 @@
  * 2026-09-06     wdfk-prog         document passive timer owner ordering
  * 2026-09-06     wdfk-prog         add local NMT CFG lifetime barrier hook
  * 2026-09-06     wdfk-prog         add B5.2 TPDO and B6 EMCY owner bridges
+ * 2026-09-06     wdfk-prog         add managed manual CFG source state
  */
 
 /**
@@ -137,6 +138,7 @@ struct lely_rtt_master_sync {
 
 #if defined(PKG_LELY_USING_MASTER_NMT_CFG)
 struct lely_rtt_master_cfg_request;
+struct lely_rtt_master_cfg_source;
 #endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
 #if defined(PKG_LELY_USING_LOCAL_OD)
 struct lely_rtt_local_od_request;
@@ -282,8 +284,16 @@ struct lely_rtt_runtime {
 #endif /* defined(PKG_LELY_USING_MASTER_COMMAND) */
 
 #if defined(PKG_LELY_USING_MASTER_NMT_CFG)
+    /** Startup-owned copied application concise DCF for each remote node. */
+    struct lely_rtt_master_cfg_source *cfg_sources[CO_NUM_NODES + 1];
     /** Owner-only manual configuration request active for each remote node. */
     struct lely_rtt_master_cfg_request *cfg_active[CO_NUM_NODES + 1];
+    /** Deferred application cfg_res marker indexed by remote Node-ID. */
+    rt_bool_t cfg_resume_pending[CO_NUM_NODES + 1];
+    /** Abort code paired with each deferred application cfg_res marker. */
+    rt_uint32_t cfg_resume_abort_code[CO_NUM_NODES + 1];
+    /** Non-zero after control admission closes and before NMT CFG teardown ends. */
+    rt_bool_t cfg_tearing_down;
 #endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
 
 #if defined(PKG_LELY_USING_LOCAL_OD)
@@ -376,12 +386,18 @@ void lely_rtt_master_sync_fini(struct lely_rtt_master_sync *sync);
 #endif /* defined(PKG_LELY_USING_MASTER_COMMAND) */
 
 #if defined(PKG_LELY_USING_MASTER_NMT_CFG)
+/** @brief Install the managed application cfg_ind before local NMT reset. */
+rt_err_t lely_rtt_master_cfg_bind(struct lely_rtt_runtime *runtime);
+/** @brief Release copied pre-start concise DCF sources after owner shutdown. */
+void lely_rtt_master_cfg_sources_fini(struct lely_rtt_runtime *runtime);
 /** @brief Dispatch one manual NMT configuration request in the owner thread. */
 void lely_rtt_master_cfg_dispatch(struct lely_rtt_runtime *runtime,
         struct lely_rtt_master_cfg_request *request);
 /** @brief Complete a configuration request that never reached the owner. */
 void lely_rtt_master_cfg_cancel_queued(
         struct lely_rtt_master_cfg_request *request);
+/** @brief Resume application CFG results after the originating Lely callback unwinds. */
+void lely_rtt_master_cfg_reap(struct lely_rtt_runtime *runtime);
 /** @brief Mark active configuration requests canceled before NMT destruction. */
 void lely_rtt_master_cfg_prepare_nmt_destroy(struct lely_rtt_runtime *runtime);
 /** @brief Complete any requests retained by the destroyed NMT service. */

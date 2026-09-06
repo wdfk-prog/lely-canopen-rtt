@@ -51,6 +51,61 @@ configured for that COB-ID. With the B6 bridge enabled, `co emcy` or
 `co emcy 1` reads the bounded remote EMCY history without exposing Lely objects
 to non-owner threads.
 
+## Manual NMT configuration example
+
+When both `PKG_LELY_EXAMPLE_MASTER_NODE1` and
+`PKG_LELY_USING_MASTER_NMT_CFG` are enabled, the target also builds
+`master_cfg_dcf.c`. Its concise DCF contains one real remote write:
+`0x1017:00 = 1000` (`UNSIGNED16`), matching Node1's heartbeat-producer
+configuration. The auto-init path copies this data into the runtime before the
+owner thread starts. Product code that creates a runtime explicitly can use the
+same order:
+
+```c
+lely_rtt_runtime_configure_master(runtime, &master_sdev);
+lely_rtt_runtime_configure_nmt_dcf(runtime, 1,
+        master_node1_cfg_dcf, master_node1_cfg_dcf_size);
+lely_rtt_runtime_start(runtime);
+```
+
+After the runtime is started, `co cfg 1 1000` enters the existing owner queue
+and `co_nmt_cfg_req()` path. Lely first executes any 0x1F22 data present in the
+Master OD; its application `cfg_ind` stage then executes the copied concise DCF
+through the same configuration-owned Client-SDO and completes it with
+`co_nmt_cfg_res()`. The checked-in Master OD still has no 0x1F22 object, so this
+example exercises the application `cfg_ind` branch directly.
+
+The copied application DCF is deliberately manual-only. Automatic NMT boot or
+other Lely configuration activity reaches the installed callback but does not
+consume this application source unless a manual RT-Thread CFG request currently
+owns that Node-ID. This keeps the existing startup policy unchanged.
+
+The checked-in `master_cfg_dcf.c/.h` are generated Host artifacts. Lely's
+official `dcfgen` performs the CANopen-aware SDO encoding from the dedicated
+`master_cfg.yml` and produces a staging `node1.bin`; `tools/gen_cfg_dcf.py`
+validates that concise DCF and embeds it as the C array used by the RT-Thread
+example. The staging `master.dcf` is discarded, so this generation path does not
+populate object 0x1F22 or change automatic boot behavior. Regenerate from the
+repository root on the Windows Host with:
+
+```powershell
+.\.venv\Scripts\python.exe .\tools\gen_cfg_dcf.py `
+    --yml .\examples\master_node1\master_cfg.yml `
+    --node node1 `
+    --symbol master_node1_cfg_dcf `
+    --basename master_cfg_dcf `
+    --out-dir .\examples\master_node1 `
+    --expect-entries 1
+```
+
+The generator also accepts `--bin <file>` when a concise DCF has already been
+produced by `dcfgen`. Do not hand-edit the generated C/H bytes.
+
+MSH reports the terminal classification together with `stage`, `source`, entry
+count and the last application DCF object when available. A successful Node1
+request therefore reports `source=app-dcf`, `entries=1` and the final object
+`1017:00`. Protocol failures retain the SDO abort code and the last stage reached.
+
 ## Windows Host regeneration
 
 Windows is the primary Host workflow for this project package. The package

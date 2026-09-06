@@ -85,6 +85,7 @@ lely-rtt-vendor/
 │   ├── setup_dcfgen_windows.ps1     # 可选：按已验证版本准备 Windows dcfgen 环境
 │   ├── requirements-dcfgen-windows.txt # dcfgen Windows 固定依赖版本
 │   ├── gen_sdev.ps1                 # Windows 通用 YAML/DCF -> static sdev C/H 生成器
+│   ├── gen_cfg_dcf.py               # Lely dcfgen concise DCF -> application C/H 生成器
 │   ├── compact_master_dcf.py        # 裁剪 dcfgen 的大 CompactSubObj Master DCF
 │   └── update_lely.sh
 │
@@ -171,7 +172,9 @@ py -3 -m venv .venv
 .\.venv\Scripts\dcfgen.exe --help
 ```
 
-通用入口是 `tools\gen_sdev.ps1`。它支持两种模式：`-Yml` 先调用 `dcfgen` 生成 Master DCF，再调用 `dcf2c`；`-Dcf` 直接把任意 DCF 转成 static sdev C。`-Name` 指定 C 符号和默认 `.c/.h` 文件名，`-OutDir` 指定输出目录。
+通用 static OD 入口是 `tools\gen_sdev.ps1`。它支持两种模式：`-Yml` 先调用 `dcfgen` 生成 Master DCF，再调用 `dcf2c`；`-Dcf` 直接把任意 DCF 转成 static sdev C。`-Name` 指定 C 符号和默认 `.c/.h` 文件名，`-OutDir` 指定输出目录。
+
+Lely 官方 `dcfgen` 还会为需要配置 SDO 的 slave 生成 `<slave>.bin` concise DCF。B8 的 manual-only application DCF 复用这个官方编码器，但不把生成的 `master.dcf` 发布到目标 Master OD：`tools\gen_cfg_dcf.py` 在临时目录调用 `dcfgen`，只取指定 slave 的 `.bin`，校验 concise-DCF framing 后生成可直接编译的 `.c/.h`。因此 `dcfgen` 负责 CANopen datatype/SDO 编码，本项目脚本只负责 staging、校验和 C 数组封装。
 
 RT-Thread MCU 上的 Master YAML 必须增加 `-CompactMaster -NoStrings`。Lely `dcfgen` 的标准 Master 模板会为多组 Manager 对象生成 `CompactSubObj=127/254`；目标端 `co_dev_create_from_sdev()` 会把这些 compact entry 展开成动态 `co_sub_t`，在小 MCU 上会造成不必要的 heap 压力。`-CompactMaster` 在 Host 端先调用 `tools\compact_master_dcf.py` 收缩这些范围，`-NoStrings` 再让 `dcf2c` 省略可选对象名称字符串。示例：
 

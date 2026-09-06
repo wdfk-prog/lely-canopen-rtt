@@ -107,6 +107,8 @@ if GetDepend('PKG_USING_LELY'):
         src.append('port/rtthread/src/msh.c')
     if GetDepend('PKG_LELY_EXAMPLE_MASTER_NODE1'):
         src.append('examples/master_node1/master_sdev.c')
+        if GetDepend('PKG_LELY_USING_MASTER_NMT_CFG'):
+            src.append('examples/master_node1/master_cfg_dcf.c')
     _validate_target_boundary(src)
 
     # The normal RT-Thread libc builds cstring.c, which already owns the
