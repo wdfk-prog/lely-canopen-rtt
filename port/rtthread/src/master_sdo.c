@@ -4,6 +4,7 @@
  * Change Logs:
  * Date           Author            Notes
  * 2026-09-05     wdfk-prog         first version
+ * 2026-09-05     wdfk-prog         arbitrate application SDO with manual NMT configuration
  */
 
 /**
@@ -573,6 +574,14 @@ lely_rtt_master_sdo_dispatch(struct lely_rtt_runtime *runtime,
         return;
     }
 #endif /* !LELY_NO_CO_NMT_BOOT */
+
+#if defined(PKG_LELY_USING_MASTER_NMT_CFG)
+    if (lely_rtt_master_cfg_node_busy(runtime, request->node_id)) {
+        lely_rtt_master_sdo_complete(request,
+                LELY_RTT_SDO_COMPLETION_LOCAL_ERROR, -RT_EBUSY, 0);
+        return;
+    }
+#endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
 
     if (runtime->sdo_active[request->node_id]) {
         lely_rtt_master_sdo_complete(request,

@@ -93,6 +93,16 @@ if GetDepend('PKG_USING_LELY'):
         src.append('port/rtthread/src/master_command.c')
     if GetDepend('PKG_LELY_USING_MASTER_SDO'):
         src.append('port/rtthread/src/master_sdo.c')
+    if GetDepend('PKG_LELY_USING_MASTER_NMT_CFG'):
+        src.append('port/rtthread/src/master_cfg.c')
+    if GetDepend('PKG_LELY_USING_LOCAL_OD'):
+        src.append('port/rtthread/src/master_od.c')
+    if GetDepend('PKG_LELY_USING_MASTER_PDO_TX'):
+        src.append('port/rtthread/src/master_pdo.c')
+    if GetDepend('PKG_LELY_USING_MASTER_EMCY'):
+        src.append('port/rtthread/src/master_emcy.c')
+    if GetDepend('PKG_LELY_USING_MASTER_TIME'):
+        src.append('port/rtthread/src/master_time.c')
     if GetDepend('PKG_LELY_USING_MSH'):
         src.append('port/rtthread/src/msh.c')
     if GetDepend('PKG_LELY_EXAMPLE_MASTER_NODE1'):

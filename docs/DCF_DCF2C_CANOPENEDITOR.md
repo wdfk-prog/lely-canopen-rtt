@@ -64,8 +64,8 @@ dcf2c [--no-strings] [-o <file> | --output=<file>] <filename> <variable_name>
 本项目实际使用：
 
 ```sh
-dcf2c examples/node1/node1.dcf node1_sdev \
-    -o examples/node1/node1_sdev.c
+dcf2c -o examples/node1/node1_sdev.c \
+    examples/node1/node1.dcf node1_sdev
 ```
 
 其中：
@@ -492,19 +492,35 @@ dcf2c examples/node1/node1.dcf node1_sdev \
     -o examples/node1/node1_sdev.c
 ```
 
-本仓库已经封装成：
+本仓库不再保留 Node1 专用 shell wrapper，所有 Host 生成统一走通用的
+`tools\gen_sdev.ps1`。**从仓库根目录执行**：
 
-```sh
-./tools/gen_node1_sdev.sh
+```powershell
+.\tools\gen_sdev.ps1 `
+    -Dcf .\examples\node1\node1.dcf `
+    -Name node1_sdev `
+    -OutDir .\examples\node1 `
+    -NoHeader `
+    -MetaFile node1_sdev.meta
 ```
 
-如果 `dcf2c` 不在 `PATH`：
+如果只需要 DCF -> `.c`，可以绕过通用脚本直接执行 Lely `dcf2c`。项目自带 Windows x86-64 工具：
 
-```sh
-DCF2C=/absolute/path/to/dcf2c ./tools/gen_node1_sdev.sh
+```powershell
+.\tools\dcf2c.exe `
+    -o .\examples\node1\node1_sdev.c `
+    .\examples\node1\node1.dcf `
+    node1_sdev
 ```
 
-脚本先写临时文件，`dcf2c` 成功后再替换正式 `node1_sdev.c`，避免生成失败把已有可用文件截断。
+Linux/macOS 中 `dcf2c` 已位于 `PATH` 时，对应完整命令是：
+
+```sh
+dcf2c -o examples/node1/node1_sdev.c examples/node1/node1.dcf node1_sdev
+```
+
+`dcf2c` 的位置参数格式是 `filename <variable name>`；上例中的 `node1_sdev` 就是生成 C 中的
+`const struct co_sdev node1_sdev` 符号。`-o` 指定输出文件；若省略 `-o`，C 源码写到标准输出。
 
 ### 4.2 `.h` 是项目自己提供的薄声明头
 
@@ -704,13 +720,12 @@ CANopenEditor 中厂商自定义对象放在 `0x2000~0x5FFF`。
 本示例使用：
 
 ```text
-0x2000:00  UNSIGNED32  rw  SDO smoke value (future RPDO candidate)
+0x2000:00  UNSIGNED32  rw  SDO/RPDO smoke value
 0x2001:00  UNSIGNED32  rw  TPDO test value
 ```
 
-`0x2001:00` 允许 PDO mapping，并被 TPDO1 映射。`0x2000:00` 虽然同样声明 `PDOMapping=1`，
-但当前 Node1 DCF 没有 `0x1400/0x1600` RPDO communication/mapping 对象，所以 B4.2 只把它当作 SDO
-读写 smoke 对象；RPDO 要在后续阶段显式增加通道和 mapping 后才能验证。
+`0x2001:00` 被 TPDO1 (`0x1800/0x1A00`) 映射；`0x2000:00` 被 RPDO1
+(`0x1400/0x1600`) 映射。当前双向 PDO smoke 通道因此已经在静态 DCF 中闭合。
 
 ### 7.7 导出 DCF
 
@@ -778,10 +793,15 @@ CANopenEditor -> remote .dcf -> dcfgen master.dcf -> Lely dcf2c -> master_sdev.c
 | --- | --- | --- |
 | `0x1000` | `UNSIGNED32`, `ro`, default `0` | Device type |
 | `0x1001` | `UNSIGNED8`, `ro`, default `0` | Error register |
+| `0x1014` | `0x081` | EMCY COB-ID |
 | `0x1017` | `UNSIGNED16`, `rw`, `1000` | Heartbeat producer |
 | `0x1018` | vendor/product/revision/serial | Identity |
 | `0x1200:01` | `0x601` | Client → Node1 SSDO |
 | `0x1200:02` | `0x581` | Node1 SSDO → Client |
+| `0x1400:01` | `0x201` | RPDO1 COB-ID |
+| `0x1400:02` | `255` | Event-driven RPDO |
+| `0x1600:00` | `1` | 1 mapped RPDO object |
+| `0x1600:01` | `0x20000020` | map `0x2000:00`, 32 bit |
 | `0x1800:01` | `0x181` | TPDO1 COB-ID |
 | `0x1800:02` | `255` | Event-driven TPDO |
 | `0x1A00:00` | `1` | 1 mapped object |
@@ -792,7 +812,7 @@ CANopenEditor -> remote .dcf -> dcfgen master.dcf -> Lely dcf2c -> master_sdev.c
 
 | Index | 类型 | Access | PDO mapping | 用途 |
 | --- | --- | --- | --- | --- |
-| `0x2000:00` | `UNSIGNED32` | `rw` | yes | 当前用于 SDO smoke；可作为后续 RPDO 候选 |
+| `0x2000:00` | `UNSIGNED32` | `rw` | yes | SDO/RPDO smoke value |
 | `0x2001:00` | `UNSIGNED32` | `rw` | yes | TPDO event smoke value |
 
 配置完后导出为：
@@ -801,10 +821,21 @@ CANopenEditor -> remote .dcf -> dcfgen master.dcf -> Lely dcf2c -> master_sdev.c
 examples/node1/node1.dcf
 ```
 
-再执行：
+再从仓库根目录执行：
 
-```sh
-./tools/gen_node1_sdev.sh
+```powershell
+.\tools\gen_sdev.ps1 `
+    -Dcf .\examples\node1\node1.dcf `
+    -Name node1_sdev `
+    -OutDir .\examples\node1 `
+    -NoHeader `
+    -MetaFile node1_sdev.meta
+```
+
+如果只想直接导出 C：
+
+```powershell
+.\tools\dcf2c.exe -o .\examples\node1\node1_sdev.c .\examples\node1\node1.dcf node1_sdev
 ```
 
 ## 10. `examples/node1/node1.dcf` 到底从哪里来的
@@ -862,31 +893,35 @@ Node1 所需的 NMT、heartbeat、SSDO、TPDO、Identity 等对象语义按 CANo
 - CiA 301 负责 CANopen 通信对象和协议语义；
 - EDS/DCF 的文件格式本身属于 CiA 306-1。
 
-### 10.3 本项目 B4 测试需求
+### 10.3 本项目 B4/B5/B6 测试需求
 
 为了验证当前 port，不是做通用产品 DCF，因此又加入了本项目专用对象：
 
 ```text
+0x1014          EMCY producer
 0x1200          SSDO server
+0x1400/0x1600  RPDO1
 0x1800/0x1A00  TPDO1
-0x2000          SDO smoke value (future RPDO candidate)
+0x2000          SDO/RPDO smoke value
 0x2001          TPDO smoke value
 ```
 
 并把 Node-ID 固定为 `1`，因此默认预定义连接得到：
 
 ```text
+EMCY      = 0x081
 Heartbeat = 0x701
 SSDO RX   = 0x601
 SSDO TX   = 0x581
+RPDO1     = 0x201
 TPDO1     = 0x181
 ```
 
 所以更准确的 provenance 描述是：
 
-> `node1.dcf` 是本项目 B4 阶段手工建立的、面向 Node-ID 1 的最小从站测试 DCF；
+> `node1.dcf` 是本项目 B4 阶段手工建立、并在 B5/B6 扩展的 Node-ID 1 最小从站测试 DCF；
 > 文件结构和基础对象参考 Lely upstream `test/co-nmt-slave.dcf`，协议对象按 CiA 301 语义整理，
-> SSDO/TPDO/0x2000/0x2001 则由本项目 smoke-test 需求定义。
+> EMCY/SSDO/RPDO/TPDO/0x2000/0x2001 则由本项目 smoke-test 需求定义。
 
 ## 11. 生成后的验证建议
 
@@ -991,7 +1026,8 @@ example currently uses Master Node-ID `127`; `0xFF` is Lely's unconfigured
 sentinel and does not advance through the normal NMT boot-up state.
 
 `dcf2c` generates `master_sdev.c`; `master_sdev.h` is a project-maintained thin
-declaration header. With `dcfgen -r`, Node1 TPDO1 is represented on the Master
-side by the RPDO/mapping and remote-PDO metadata objects. This generation step
-does not by itself prove target compilation, CAN traffic, Boot-up, SDO or PDO
+declaration header. With `dcfgen -r`, both Node1 PDO directions are represented on the Master side:
+Node1 TPDO1 becomes the Master RPDO/mapping path, and Node1 RPDO1 becomes the
+Master TPDO/mapping path with remote-PDO metadata. This generation step does not
+by itself prove target compilation, CAN traffic, Boot-up, SDO, EMCY or PDO
 behavior.
