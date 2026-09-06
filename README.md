@@ -82,7 +82,6 @@ lely-rtt-vendor/
 ├── tools/                          # Host/vendor 维护工具，不进入目标固件
 │   ├── check_vendor.sh
 │   ├── dcf2c.exe                     # Windows x86-64 Lely DCF-to-C 工具
-│   ├── gen_node1_sdev.sh            # 旧 Node1 静态从站 provenance 工具
 │   ├── setup_dcfgen_windows.ps1     # 可选：按已验证版本准备 Windows dcfgen 环境
 │   ├── requirements-dcfgen-windows.txt # dcfgen Windows 固定依赖版本
 │   ├── gen_sdev.ps1                 # Windows 通用 YAML/DCF -> static sdev C/H 生成器

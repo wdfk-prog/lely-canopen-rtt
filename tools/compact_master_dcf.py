@@ -20,6 +20,9 @@ SECTION_RE = re.compile(r"^\s*\[([^\]]+)\]\s*$")
 KEY_VALUE_RE = re.compile(r"^(\s*)([^=]+?)(\s*=\s*)(.*?)(\r?\n)?$")
 OBJECT_RE = re.compile(r"^[0-9A-Fa-f]{4}$")
 VALUE_SECTION_RE = re.compile(r"^([0-9A-Fa-f]{4})Value$", re.IGNORECASE)
+TPDO_RESERVED_SUB4_RE = re.compile(
+    r"^([0-9A-Fa-f]{4})sub0?4$", re.IGNORECASE
+)
 
 # These compact arrays are indexed by CANopen node-ID. Keeping sub-indices up to
 # the highest configured node preserves the access pattern used by NMT/boot
@@ -106,6 +109,48 @@ def replace_value(line: str, new_value: int) -> str:
     return f"{match.group(1)}{match.group(2)}{match.group(3)}{new_value}{newline}"
 
 
+def strip_reserved_tpdo_sub4(text: str) -> tuple[str, list[str]]:
+    """Remove reserved TPDO communication sub-index 04h from a dcfgen DCF."""
+    lines = text.splitlines(keepends=True)
+    sections = collect_sections(lines)
+    by_name = {section.name.casefold(): section for section in sections}
+    removals: list[Section] = []
+    removed_objects: list[str] = []
+
+    for section in sections:
+        match = TPDO_RESERVED_SUB4_RE.fullmatch(section.name)
+        if not match:
+            continue
+        obj_index = int(match.group(1), 16)
+        if obj_index < 0x1800 or obj_index > 0x19FF:
+            continue
+
+        parent = by_name.get(match.group(1).casefold())
+        if parent is None:
+            raise ValueError(
+                f"TPDO communication sub-index without parent object: [{section.name}]"
+            )
+        values = section_values(lines, parent)
+        subnumber = values.get("subnumber")
+        if subnumber is None:
+            raise ValueError(
+                f"TPDO communication object 0x{obj_index:04X} has no SubNumber"
+            )
+        count = parse_positive_int(subnumber[0])
+        if count is None or count <= 0:
+            raise ValueError(
+                f"invalid SubNumber for TPDO communication object 0x{obj_index:04X}"
+            )
+        lines[subnumber[1]] = replace_value(lines[subnumber[1]], count - 1)
+        removals.append(section)
+        removed_objects.append(f"{obj_index:04X}")
+
+    for section in sorted(removals, key=lambda item: item.start, reverse=True):
+        del lines[section.start:section.end]
+
+    return "".join(lines), removed_objects
+
+
 def estimate_subobjects(lines: list[str], sections: list[Section]) -> tuple[int, int]:
     objects = 0
     subobjects = 0
@@ -136,7 +181,12 @@ def compact_dcf(
     *,
     error_history_depth: int,
     max_subobjects: int,
-) -> tuple[str, list[tuple[str, int, int]], int, int, int, int, int]:
+) -> tuple[str, list[tuple[str, int, int]], list[str], int, int, int, int, int]:
+    original_lines = text.splitlines(keepends=True)
+    before_objects, before_subobjects = estimate_subobjects(
+        original_lines, collect_sections(original_lines)
+    )
+    text, removed_reserved_tpdo = strip_reserved_tpdo_sub4(text)
     lines = text.splitlines(keepends=True)
     sections = collect_sections(lines)
     by_name = {section.name.casefold(): section for section in sections}
@@ -154,7 +204,6 @@ def compact_dcf(
             continue
         explicit_value_keys[match.group(1).upper()] = numeric_value_keys(lines, section)
 
-    before_objects, before_subobjects = estimate_subobjects(lines, sections)
     changes: list[tuple[str, int, int]] = []
 
     for section in sections:
@@ -197,6 +246,7 @@ def compact_dcf(
     return (
         "".join(lines),
         changes,
+        removed_reserved_tpdo,
         max_node_id,
         before_objects,
         before_subobjects,
@@ -248,7 +298,16 @@ def main() -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    output_text, changes, max_node_id, before_obj, before_sub, after_obj, after_sub = result
+    (
+        output_text,
+        changes,
+        removed_reserved_tpdo,
+        max_node_id,
+        before_obj,
+        before_sub,
+        after_obj,
+        after_sub,
+    ) = result
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temp = args.output.with_name(args.output.name + ".tmp")
     try:
@@ -264,6 +323,8 @@ def main() -> int:
         return 1
 
     print(f"Master DCF nodes: highest configured remote node-ID = {max_node_id}")
+    for index in removed_reserved_tpdo:
+        print(f"  0x{index}: removed reserved TPDO communication sub-index 04h")
     for index, old, new in changes:
         print(f"  0x{index}: CompactSubObj {old} -> {new}")
     print(
