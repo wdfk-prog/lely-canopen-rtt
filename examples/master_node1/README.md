@@ -38,11 +38,18 @@ items remain unconfirmed:
 These are example-generation values, not product ABI. Confirm them before CAN
 HIL and regenerate the artifacts instead of adding policy to `runtime.c`.
 
-`dcfgen -r` also mirrors Node1 TPDO1 into the Master description. The checked-in
-first-stage OD therefore contains Master RPDO1 (`0x1400/0x1600`), a local mapped
-value (`0x2000:01`), and remote PDO metadata (`0x5800/0x5A00`) for Node1's
-`0x2001:00` mapping. This only establishes the generated/static OD structure;
-B4 does not add a generic application PDO API.
+`dcfgen -r` mirrors both Node1 PDO directions into the Master description. The
+checked-in OD contains Master RPDO1 (`0x1400/0x1600`) mapped to local
+`0x2000:01` for Node1 TPDO1 (`0x181`), plus Master TPDO1 (`0x1800/0x1A00`)
+mapped from local `0x2200:01` to Node1 RPDO1 (`0x201`). Remote mapping metadata
+is retained at `0x5800/0x5A00` and `0x5C00/0x5E00`. B5.2 applications update
+`0x2200:01` through the owner-safe local OD API and then call
+`lely_rtt_runtime_tpdo_event(runtime, 1)` (or `co tpdo event 1`).
+
+Node1 also exposes EMCY at `0x081`; the Master `0x1028:01` consumer entry is
+configured for that COB-ID. With the B6 bridge enabled, `co emcy` or
+`co emcy 1` reads the bounded remote EMCY history without exposing Lely objects
+to non-owner threads.
 
 ## Windows Host regeneration
 

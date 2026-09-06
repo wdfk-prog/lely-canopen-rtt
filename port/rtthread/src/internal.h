@@ -9,6 +9,7 @@
  * 2026-09-05     wdfk-prog         add Master command and SDO transaction state
  * 2026-09-05     wdfk-prog         add synchronous CFG, local OD and TIME state
  * 2026-09-06     wdfk-prog         add local NMT CFG lifetime barrier hook
+ * 2026-09-06     wdfk-prog         add B5.2 TPDO and B6 EMCY owner bridges
  */
 
 /**
@@ -99,6 +100,17 @@ struct lely_rtt_time_state {
     rt_bool_t initialized;     /**< RT_TRUE after the first valid tick sample. */
 };
 
+#if defined(PKG_LELY_USING_MASTER_EMCY)
+/** @brief One atomically published remote EMCY history slot. */
+struct lely_rtt_emcy_slot {
+    rt_atomic_t guard; /**< Odd while the owner updates the remaining fields. */
+    rt_atomic_t sequence; /**< Non-zero event sequence stored in this slot. */
+    rt_atomic_t header; /**< Packed Node-ID, error code and error register. */
+    rt_atomic_t msef_lo; /**< Manufacturer-specific bytes 0..3. */
+    rt_atomic_t msef_hi; /**< Manufacturer-specific byte 4. */
+};
+#endif /* defined(PKG_LELY_USING_MASTER_EMCY) */
+
 #if defined(PKG_LELY_USING_MASTER_COMMAND)
 /** @brief Completion event used by synchronous application-to-owner requests. */
 #define LELY_RTT_MASTER_SYNC_DONE (1u << 0)
@@ -129,6 +141,12 @@ struct lely_rtt_master_cfg_request;
 struct lely_rtt_local_od_request;
 struct lely_rtt_local_od_hook;
 #endif /* defined(PKG_LELY_USING_LOCAL_OD) */
+#if defined(PKG_LELY_USING_MASTER_PDO_TX)
+struct lely_rtt_master_pdo_request;
+#endif /* defined(PKG_LELY_USING_MASTER_PDO_TX) */
+#if defined(PKG_LELY_USING_MASTER_EMCY)
+struct lely_rtt_master_emcy_request;
+#endif /* defined(PKG_LELY_USING_MASTER_EMCY) */
 #if defined(PKG_LELY_USING_MASTER_TIME)
 struct lely_rtt_master_time_request;
 #endif /* defined(PKG_LELY_USING_MASTER_TIME) */
@@ -145,6 +163,12 @@ enum lely_rtt_master_command_type {
 #if defined(PKG_LELY_USING_LOCAL_OD)
     LELY_RTT_MASTER_COMMAND_LOCAL_OD,
 #endif /* defined(PKG_LELY_USING_LOCAL_OD) */
+#if defined(PKG_LELY_USING_MASTER_PDO_TX)
+    LELY_RTT_MASTER_COMMAND_PDO_TX,
+#endif /* defined(PKG_LELY_USING_MASTER_PDO_TX) */
+#if defined(PKG_LELY_USING_MASTER_EMCY)
+    LELY_RTT_MASTER_COMMAND_EMCY,
+#endif /* defined(PKG_LELY_USING_MASTER_EMCY) */
 #if defined(PKG_LELY_USING_MASTER_TIME)
     LELY_RTT_MASTER_COMMAND_TIME,
 #endif /* defined(PKG_LELY_USING_MASTER_TIME) */
@@ -173,6 +197,16 @@ struct lely_rtt_master_command {
             struct lely_rtt_local_od_request *request;
         } od;
 #endif /* defined(PKG_LELY_USING_LOCAL_OD) */
+#if defined(PKG_LELY_USING_MASTER_PDO_TX)
+        struct {
+            struct lely_rtt_master_pdo_request *request;
+        } pdo;
+#endif /* defined(PKG_LELY_USING_MASTER_PDO_TX) */
+#if defined(PKG_LELY_USING_MASTER_EMCY)
+        struct {
+            struct lely_rtt_master_emcy_request *request;
+        } emcy;
+#endif /* defined(PKG_LELY_USING_MASTER_EMCY) */
 #if defined(PKG_LELY_USING_MASTER_TIME)
         struct {
             struct lely_rtt_master_time_request *request;
@@ -258,6 +292,13 @@ struct lely_rtt_runtime {
     rt_atomic_t local_od_change_source;
     rt_atomic_t local_od_change_size;
 #endif /* defined(PKG_LELY_USING_LOCAL_OD) */
+
+#if defined(PKG_LELY_USING_MASTER_EMCY)
+    /** Latest non-zero received EMCY sequence; owner is the only writer. */
+    rt_atomic_t emcy_latest_sequence;
+    /** Bounded remote EMCY history published through per-slot seqlocks. */
+    struct lely_rtt_emcy_slot emcy_history[PKG_LELY_MASTER_EMCY_HISTORY_DEPTH];
+#endif /* defined(PKG_LELY_USING_MASTER_EMCY) */
 
 #if defined(PKG_LELY_USING_MASTER_TIME)
     /** Even non-zero value identifies a stable received TIME snapshot. */
@@ -370,6 +411,30 @@ void lely_rtt_local_od_dispatch(struct lely_rtt_runtime *runtime,
 /** @brief Complete a local OD request that never reached the owner. */
 void lely_rtt_local_od_cancel_queued(struct lely_rtt_local_od_request *request);
 #endif /* defined(PKG_LELY_USING_LOCAL_OD) */
+
+#if defined(PKG_LELY_USING_MASTER_PDO_TX)
+/** @brief Dispatch one owner-safe event-driven TPDO trigger. */
+void lely_rtt_master_pdo_dispatch(struct lely_rtt_runtime *runtime,
+        struct lely_rtt_master_pdo_request *request);
+/** @brief Complete a TPDO request that never reached the owner. */
+void lely_rtt_master_pdo_cancel_queued(
+        struct lely_rtt_master_pdo_request *request);
+#endif /* defined(PKG_LELY_USING_MASTER_PDO_TX) */
+
+#if defined(PKG_LELY_USING_MASTER_EMCY)
+/** @brief Reset the retained remote EMCY history for a new runtime run. */
+void lely_rtt_master_emcy_reset(struct lely_rtt_runtime *runtime);
+/** @brief Attach the remote EMCY history callback to the active Lely service. */
+rt_err_t lely_rtt_master_emcy_bind(struct lely_rtt_runtime *runtime);
+/** @brief Detach the runtime EMCY callback when its service still exists. */
+void lely_rtt_master_emcy_unbind(struct lely_rtt_runtime *runtime);
+/** @brief Dispatch one owner-safe local EMCY producer operation. */
+void lely_rtt_master_emcy_dispatch(struct lely_rtt_runtime *runtime,
+        struct lely_rtt_master_emcy_request *request);
+/** @brief Complete an EMCY request that never reached the owner. */
+void lely_rtt_master_emcy_cancel_queued(
+        struct lely_rtt_master_emcy_request *request);
+#endif /* defined(PKG_LELY_USING_MASTER_EMCY) */
 
 #if defined(PKG_LELY_USING_MASTER_TIME)
 /** @brief Reset the application-visible received TIME snapshot. */

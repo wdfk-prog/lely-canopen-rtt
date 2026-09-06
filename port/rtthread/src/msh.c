@@ -6,6 +6,7 @@
  * 2026-09-05     wdfk-prog         first version
  * 2026-09-05     wdfk-prog         expose configuration, local OD and TIME commands
  * 2026-09-06     wdfk-prog         clarify unsupported CFG restore diagnostic
+ * 2026-09-06     wdfk-prog         expose TPDO trigger and EMCY diagnostics
  */
 
 /**
@@ -21,6 +22,9 @@
 
 #include <lely/co/dev.h>
 #include <lely/co/nmt.h>
+#if defined(PKG_LELY_USING_MASTER_PDO_TX)
+#include <lely/co/pdo.h>
+#endif /* defined(PKG_LELY_USING_MASTER_PDO_TX) */
 #include <lely/rtthread/runtime.h>
 
 #include <finsh.h>
@@ -233,6 +237,12 @@ lely_rtt_msh_help(void)
     rt_kprintf("co od read <index> <subindex> <type>\n");
     rt_kprintf("co od write <index> <subindex> <type> <value>\n");
 #endif /* defined(PKG_LELY_USING_LOCAL_OD) */
+#if defined(PKG_LELY_USING_MASTER_PDO_TX)
+    rt_kprintf("co tpdo event <pdo-number>\n");
+#endif /* defined(PKG_LELY_USING_MASTER_PDO_TX) */
+#if defined(PKG_LELY_USING_MASTER_EMCY)
+    rt_kprintf("co emcy [node-id]\n");
+#endif /* defined(PKG_LELY_USING_MASTER_EMCY) */
 #if defined(PKG_LELY_USING_MASTER_TIME)
     rt_kprintf("co time status\n");
     rt_kprintf("co time mode off|consumer|producer|both\n");
@@ -717,6 +727,82 @@ lely_rtt_msh_od(int argc, char **argv)
 }
 #endif /* defined(PKG_LELY_USING_LOCAL_OD) */
 
+#if defined(PKG_LELY_USING_MASTER_PDO_TX)
+static void
+lely_rtt_msh_tpdo(int argc, char **argv)
+{
+    lely_rtt_runtime_t *runtime;
+    rt_uint32_t pdo_number;
+    rt_err_t err;
+
+    if (argc != 4 || strcmp(argv[2], "event")
+            || !lely_rtt_msh_parse_u32(argv[3], CO_NUM_PDOS, &pdo_number)
+            || !pdo_number) {
+        rt_kprintf("co: TPDO command must be event with number 1..%u\n",
+                (unsigned int)CO_NUM_PDOS);
+        return;
+    }
+
+    runtime = lely_rtt_msh_runtime();
+    if (!runtime)
+        return;
+
+    err = lely_rtt_runtime_tpdo_event(runtime, (rt_uint16_t)pdo_number);
+    if (err != RT_EOK)
+        rt_kprintf("co: TPDO event failed (%d)\n", err);
+    else
+        rt_kprintf("tpdo %u: event accepted\n", (unsigned int)pdo_number);
+}
+#endif /* defined(PKG_LELY_USING_MASTER_PDO_TX) */
+
+#if defined(PKG_LELY_USING_MASTER_EMCY)
+static void
+lely_rtt_msh_emcy(int argc, char **argv)
+{
+    struct lely_rtt_emcy_event event;
+    lely_rtt_runtime_t *runtime;
+    rt_uint8_t node_id = 0;
+    rt_err_t err;
+
+    if (argc != 2 && argc != 3) {
+        lely_rtt_msh_help();
+        return;
+    }
+    if (argc == 3 && !lely_rtt_msh_parse_node(argv[2], &node_id)) {
+        rt_kprintf("co: EMCY node-id must be 1..127\n");
+        return;
+    }
+
+    runtime = lely_rtt_msh_runtime();
+    if (!runtime)
+        return;
+
+    err = lely_rtt_runtime_get_emcy(runtime, node_id, &event);
+    if (err == -RT_EBUSY) {
+        if (node_id)
+            rt_kprintf("node %u: no retained EMCY\n", (unsigned int)node_id);
+        else
+            rt_kprintf("emcy: no retained event\n");
+        return;
+    }
+    if (err != RT_EOK) {
+        rt_kprintf("co: EMCY query failed (%d)\n", err);
+        return;
+    }
+
+    rt_kprintf("emcy node %u: eec=0x%04x er=0x%02x "
+            "msef=%02x%02x%02x%02x%02x seq=%u\n",
+            (unsigned int)event.node_id, (unsigned int)event.error_code,
+            (unsigned int)event.error_register,
+            (unsigned int)event.manufacturer[0],
+            (unsigned int)event.manufacturer[1],
+            (unsigned int)event.manufacturer[2],
+            (unsigned int)event.manufacturer[3],
+            (unsigned int)event.manufacturer[4],
+            (unsigned int)event.sequence);
+}
+#endif /* defined(PKG_LELY_USING_MASTER_EMCY) */
+
 #if defined(PKG_LELY_USING_MASTER_SDO)
 static void
 lely_rtt_msh_sdo_result(lely_rtt_sdo_request_t *request,
@@ -890,6 +976,18 @@ co(int argc, char **argv)
         return 0;
     }
 #endif /* defined(PKG_LELY_USING_LOCAL_OD) */
+#if defined(PKG_LELY_USING_MASTER_PDO_TX)
+    if (argc >= 2 && !strcmp(argv[1], "tpdo")) {
+        lely_rtt_msh_tpdo(argc, argv);
+        return 0;
+    }
+#endif /* defined(PKG_LELY_USING_MASTER_PDO_TX) */
+#if defined(PKG_LELY_USING_MASTER_EMCY)
+    if (argc >= 2 && !strcmp(argv[1], "emcy")) {
+        lely_rtt_msh_emcy(argc, argv);
+        return 0;
+    }
+#endif /* defined(PKG_LELY_USING_MASTER_EMCY) */
 #if defined(PKG_LELY_USING_MASTER_TIME)
     if (argc >= 2 && !strcmp(argv[1], "time")) {
         lely_rtt_msh_time(argc, argv);

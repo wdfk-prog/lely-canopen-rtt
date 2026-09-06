@@ -9,6 +9,7 @@
  * 2026-09-05     wdfk-prog         integrate Master command and SDO ingress
  * 2026-09-05     wdfk-prog         integrate configuration, local OD and TIME bridges
  * 2026-09-06     wdfk-prog         retire CFG requests at local NMT barriers
+ * 2026-09-06     wdfk-prog         bind B6 EMCY bridge to NMT service lifetime
  */
 
 /**
@@ -115,6 +116,9 @@ lely_rtt_master_snapshots_reset(struct lely_rtt_runtime *runtime)
 #if defined(PKG_LELY_USING_LOCAL_OD)
     lely_rtt_local_od_reset(runtime);
 #endif /* defined(PKG_LELY_USING_LOCAL_OD) */
+#if defined(PKG_LELY_USING_MASTER_EMCY)
+    lely_rtt_master_emcy_reset(runtime);
+#endif /* defined(PKG_LELY_USING_MASTER_EMCY) */
 #if defined(PKG_LELY_USING_MASTER_TIME)
     lely_rtt_master_time_reset(runtime);
 #endif /* defined(PKG_LELY_USING_MASTER_TIME) */
@@ -168,6 +172,16 @@ lely_rtt_master_state_ind(co_nmt_t *nmt, co_unsigned8_t id,
         /* The helper only retires states emitted after co_nmt_slaves_fini(). */
         lely_rtt_master_cfg_on_local_nmt_state(runtime, state);
 #endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
+#if defined(PKG_LELY_USING_MASTER_EMCY)
+        /*
+         * EMCY follows the same NMT service lifetime as TIME: STOP/reset may
+         * destroy it, and Lely recreates it before the usable state indication.
+         */
+        if ((state == CO_NMT_ST_PREOP || state == CO_NMT_ST_START)
+                && lely_rtt_master_emcy_bind(runtime) != RT_EOK)
+            LELY_RTT_LOG_W("EMCY bridge rebind failed after local NMT state 0x%02x",
+                    (unsigned int)state);
+#endif /* defined(PKG_LELY_USING_MASTER_EMCY) */
 #if defined(PKG_LELY_USING_MASTER_TIME)
         /*
          * Lely destroys TIME when local NMT leaves Pre-op/Operational and
@@ -337,6 +351,17 @@ lely_rtt_master_init(struct lely_rtt_runtime *runtime)
     }
 #endif /* defined(PKG_LELY_USING_LOCAL_OD) */
 
+#if defined(PKG_LELY_USING_MASTER_EMCY)
+    {
+        rt_err_t err = lely_rtt_master_emcy_bind(runtime);
+
+        if (err != RT_EOK) {
+            LELY_RTT_LOG_E("EMCY bridge bind failed: %d", err);
+            return err;
+        }
+    }
+#endif /* defined(PKG_LELY_USING_MASTER_EMCY) */
+
 #if defined(PKG_LELY_USING_MASTER_TIME)
     {
         rt_err_t err = lely_rtt_master_time_bind(runtime);
@@ -374,6 +399,9 @@ lely_rtt_master_fini(struct lely_rtt_runtime *runtime)
 #if defined(PKG_LELY_USING_LOCAL_OD)
         lely_rtt_local_od_unbind(runtime);
 #endif /* defined(PKG_LELY_USING_LOCAL_OD) */
+#if defined(PKG_LELY_USING_MASTER_EMCY)
+        lely_rtt_master_emcy_unbind(runtime);
+#endif /* defined(PKG_LELY_USING_MASTER_EMCY) */
 #if defined(PKG_LELY_USING_MASTER_TIME)
         lely_rtt_master_time_unbind(runtime);
 #endif /* defined(PKG_LELY_USING_MASTER_TIME) */

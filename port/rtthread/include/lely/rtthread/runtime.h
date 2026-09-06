@@ -10,6 +10,7 @@
  * 2026-09-05     wdfk-prog         add NMT configuration, local OD and TIME APIs
  * 2026-09-06     wdfk-prog         clarify CFG restore and TIME lifetime contracts
  * 2026-09-06     wdfk-prog         document snapshot reader scheduling contract
+ * 2026-09-06     wdfk-prog         add B5.2 TPDO and B6 EMCY application APIs
  */
 
 /**
@@ -76,6 +77,20 @@ struct lely_rtt_nmt_cfg_result {
     rt_uint32_t abort_code; /**< SDO abort code, or zero when absent. */
 };
 #endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
+
+#if defined(PKG_LELY_USING_MASTER_EMCY)
+/** Number of manufacturer-specific bytes carried by one CiA 301 EMCY frame. */
+#define LELY_RTT_EMCY_MSEF_SIZE 5u
+
+/** @brief Retained metadata for one received remote CANopen EMCY frame. */
+struct lely_rtt_emcy_event {
+    rt_uint8_t node_id; /**< Remote EMCY producer Node-ID. */
+    rt_uint16_t error_code; /**< Emergency error code (EEC). */
+    rt_uint8_t error_register; /**< Error register byte from the frame. */
+    rt_uint8_t manufacturer[LELY_RTT_EMCY_MSEF_SIZE]; /**< Manufacturer field. */
+    rt_uint32_t sequence; /**< Runtime-local receive sequence; zero is never used. */
+};
+#endif /* defined(PKG_LELY_USING_MASTER_EMCY) */
 
 #if defined(PKG_LELY_USING_MASTER_TIME)
 /** @brief Enable reception of CANopen TIME frames on object 0x1012's CAN-ID. */
@@ -501,6 +516,80 @@ void lely_rtt_local_od_free(void *data);
 rt_err_t lely_rtt_runtime_get_local_od_change(lely_rtt_runtime_t *runtime,
         struct lely_rtt_local_od_change *change);
 #endif /* defined(PKG_LELY_USING_LOCAL_OD) */
+
+#if defined(PKG_LELY_USING_MASTER_PDO_TX)
+/**
+ * @brief Trigger one statically configured event-driven local TPDO.
+ *
+ * The local NMT state must be Operational because Lely only owns PDO services
+ * in that state. The TPDO must already be valid, event-driven (type 254/255),
+ * non-MPDO and have a non-empty static mapping. Update mapped manufacturer OD
+ * values through lely_rtt_runtime_local_od_write() before calling this API.
+ * Dynamic mapping and synchronous TPDO triggering are intentionally excluded.
+ *
+ * @param runtime Started runtime with a configured local Master.
+ * @param pdo_number Local TPDO number in the range 1..CO_NUM_PDOS.
+ * @return RT_EOK after Lely accepts the event, -RT_EBUSY when the PDO service
+ *         is inactive, -RT_EINVAL for invalid/non-event-driven configuration,
+ *         or another owner/IPC/local error.
+ */
+rt_err_t lely_rtt_runtime_tpdo_event(lely_rtt_runtime_t *runtime,
+        rt_uint16_t pdo_number);
+#endif /* defined(PKG_LELY_USING_MASTER_PDO_TX) */
+
+#if defined(PKG_LELY_USING_MASTER_EMCY)
+/**
+ * @brief Read the newest retained remote EMCY, optionally filtered by Node-ID.
+ *
+ * @p node_id 0 selects the newest event from any configured remote producer;
+ * 1..127 selects the newest retained event from that producer. The history is
+ * bounded by PKG_LELY_MASTER_EMCY_HISTORY_DEPTH, so an older node-specific
+ * event can be overwritten by newer traffic. If a read races owner publication,
+ * the caller may sleep briefly and retry; use normal schedulable thread context.
+ *
+ * @param runtime Runtime handle.
+ * @param node_id Zero for any producer, or a remote Node-ID in 1..127.
+ * @param event Output stable retained event.
+ * @return RT_EOK when found, -RT_EBUSY when no matching retained event exists,
+ *         or -RT_EINVAL for invalid arguments.
+ */
+rt_err_t lely_rtt_runtime_get_emcy(lely_rtt_runtime_t *runtime,
+        rt_uint8_t node_id, struct lely_rtt_emcy_event *event);
+
+/**
+ * @brief Push and broadcast one local Master EMCY through Lely's owner service.
+ *
+ * The local NMT state must provide an active EMCY service (Pre-op/Operational)
+ * and object 0x1014 must enable the local producer COB-ID. Lely maintains
+ * object 0x1003 and the combined 0x1001 error register; it also
+ * sets the generic-error bit required for a non-zero error condition.
+ *
+ * @param runtime Started runtime with a configured local Master.
+ * @param error_code Non-zero CiA 301/profile/manufacturer emergency error code.
+ * @param error_register Error-register bits associated with this error.
+ * @param manufacturer Optional five-byte manufacturer field; RT_NULL means zero.
+ * @return RT_EOK on success, -RT_EBUSY while EMCY/the producer is inactive,
+ *         or another owner/IPC/local error.
+ */
+rt_err_t lely_rtt_runtime_emcy_push(lely_rtt_runtime_t *runtime,
+        rt_uint16_t error_code, rt_uint8_t error_register,
+        const rt_uint8_t manufacturer[LELY_RTT_EMCY_MSEF_SIZE]);
+
+/**
+ * @brief Pop the newest local Master EMCY error and broadcast the reset update.
+ * @param runtime Started runtime with an active local EMCY producer.
+ * @return RT_EOK on success/no active local error, -RT_EBUSY while inactive,
+ *         or another owner/IPC/local error.
+ */
+rt_err_t lely_rtt_runtime_emcy_pop(lely_rtt_runtime_t *runtime);
+
+/**
+ * @brief Clear all local Master EMCY errors and broadcast error reset/no-error.
+ * @param runtime Started runtime with an active local EMCY producer.
+ * @return RT_EOK on success, -RT_EBUSY while inactive, or another local error.
+ */
+rt_err_t lely_rtt_runtime_emcy_clear(lely_rtt_runtime_t *runtime);
+#endif /* defined(PKG_LELY_USING_MASTER_EMCY) */
 
 #if defined(PKG_LELY_USING_MASTER_TIME)
 /**

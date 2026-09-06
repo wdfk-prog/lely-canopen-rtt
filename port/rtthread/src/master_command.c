@@ -5,6 +5,7 @@
  * Date           Author            Notes
  * 2026-09-05     wdfk-prog         first version
  * 2026-09-05     wdfk-prog         add synchronous owner request dispatch
+ * 2026-09-06     wdfk-prog         dispatch TPDO and EMCY owner-safe requests
  */
 
 /**
@@ -342,6 +343,16 @@ lely_rtt_master_command_dispatch(struct lely_rtt_runtime *runtime)
             lely_rtt_local_od_dispatch(runtime, command.data.od.request);
             break;
 #endif /* defined(PKG_LELY_USING_LOCAL_OD) */
+#if defined(PKG_LELY_USING_MASTER_PDO_TX)
+        case LELY_RTT_MASTER_COMMAND_PDO_TX:
+            lely_rtt_master_pdo_dispatch(runtime, command.data.pdo.request);
+            break;
+#endif /* defined(PKG_LELY_USING_MASTER_PDO_TX) */
+#if defined(PKG_LELY_USING_MASTER_EMCY)
+        case LELY_RTT_MASTER_COMMAND_EMCY:
+            lely_rtt_master_emcy_dispatch(runtime, command.data.emcy.request);
+            break;
+#endif /* defined(PKG_LELY_USING_MASTER_EMCY) */
 #if defined(PKG_LELY_USING_MASTER_TIME)
         case LELY_RTT_MASTER_COMMAND_TIME:
             lely_rtt_master_time_dispatch(runtime, command.data.time.request);
@@ -385,6 +396,16 @@ lely_rtt_master_command_fini(struct lely_rtt_runtime *runtime)
                 lely_rtt_local_od_cancel_queued(command.data.od.request);
                 break;
 #endif /* defined(PKG_LELY_USING_LOCAL_OD) */
+#if defined(PKG_LELY_USING_MASTER_PDO_TX)
+            case LELY_RTT_MASTER_COMMAND_PDO_TX:
+                lely_rtt_master_pdo_cancel_queued(command.data.pdo.request);
+                break;
+#endif /* defined(PKG_LELY_USING_MASTER_PDO_TX) */
+#if defined(PKG_LELY_USING_MASTER_EMCY)
+            case LELY_RTT_MASTER_COMMAND_EMCY:
+                lely_rtt_master_emcy_cancel_queued(command.data.emcy.request);
+                break;
+#endif /* defined(PKG_LELY_USING_MASTER_EMCY) */
 #if defined(PKG_LELY_USING_MASTER_TIME)
             case LELY_RTT_MASTER_COMMAND_TIME:
                 lely_rtt_master_time_cancel_queued(command.data.time.request);
