@@ -5,6 +5,7 @@
  * Date           Author            Notes
  * 2026-09-05     wdfk-prog         first version
  * 2026-09-05     wdfk-prog         arbitrate application SDO with manual NMT configuration
+ * 2026-09-06     wdfk-prog         add block transfer and application cancellation
  */
 
 /**
@@ -49,6 +50,8 @@ struct lely_rtt_sdo_request {
     rt_uint16_t index;
     rt_uint8_t subindex;
     rt_uint32_t timeout_ms;
+    rt_bool_t block_transfer;
+    rt_uint8_t block_pst;
 
     void *buffer;
     rt_size_t size;
@@ -321,7 +324,8 @@ static rt_err_t
 lely_rtt_runtime_post_sdo(lely_rtt_runtime_t *runtime,
         lely_rtt_sdo_request_t *request, enum lely_rtt_sdo_operation operation,
         rt_uint8_t node_id, rt_uint16_t index, rt_uint8_t subindex,
-        const void *data, rt_size_t size, rt_uint32_t timeout_ms)
+        const void *data, rt_size_t size, rt_uint32_t timeout_ms,
+        rt_bool_t block_transfer, rt_uint8_t block_pst)
 {
     struct lely_rtt_master_command command;
     void *copy = RT_NULL;
@@ -352,6 +356,8 @@ lely_rtt_runtime_post_sdo(lely_rtt_runtime_t *runtime,
     request->index = index;
     request->subindex = subindex;
     request->timeout_ms = timeout_ms;
+    request->block_transfer = block_transfer;
+    request->block_pst = block_pst;
     request->buffer = copy;
     request->size = operation == LELY_RTT_SDO_DOWNLOAD ? size : 0;
     request->completion_status = LELY_RTT_SDO_COMPLETION_LOCAL_ERROR;
@@ -381,7 +387,7 @@ lely_rtt_runtime_post_sdo_upload(lely_rtt_runtime_t *runtime,
         rt_uint16_t index, rt_uint8_t subindex, rt_uint32_t timeout_ms)
 {
     return lely_rtt_runtime_post_sdo(runtime, request, LELY_RTT_SDO_UPLOAD,
-            node_id, index, subindex, RT_NULL, 0, timeout_ms);
+            node_id, index, subindex, RT_NULL, 0, timeout_ms, RT_FALSE, 0);
 }
 
 rt_err_t
@@ -391,7 +397,52 @@ lely_rtt_runtime_post_sdo_download(lely_rtt_runtime_t *runtime,
         rt_size_t size, rt_uint32_t timeout_ms)
 {
     return lely_rtt_runtime_post_sdo(runtime, request, LELY_RTT_SDO_DOWNLOAD,
-            node_id, index, subindex, data, size, timeout_ms);
+            node_id, index, subindex, data, size, timeout_ms, RT_FALSE, 0);
+}
+
+rt_err_t
+lely_rtt_runtime_post_sdo_block_upload(lely_rtt_runtime_t *runtime,
+        lely_rtt_sdo_request_t *request, rt_uint8_t node_id,
+        rt_uint16_t index, rt_uint8_t subindex, rt_uint8_t pst,
+        rt_uint32_t timeout_ms)
+{
+    return lely_rtt_runtime_post_sdo(runtime, request, LELY_RTT_SDO_UPLOAD,
+            node_id, index, subindex, RT_NULL, 0, timeout_ms, RT_TRUE, pst);
+}
+
+rt_err_t
+lely_rtt_runtime_post_sdo_block_download(lely_rtt_runtime_t *runtime,
+        lely_rtt_sdo_request_t *request, rt_uint8_t node_id,
+        rt_uint16_t index, rt_uint8_t subindex, const void *data,
+        rt_size_t size, rt_uint32_t timeout_ms)
+{
+    return lely_rtt_runtime_post_sdo(runtime, request, LELY_RTT_SDO_DOWNLOAD,
+            node_id, index, subindex, data, size, timeout_ms, RT_TRUE, 0);
+}
+
+rt_err_t
+lely_rtt_sdo_request_cancel(lely_rtt_sdo_request_t *request)
+{
+    struct lely_rtt_master_command command;
+    const rt_atomic_t state = request
+            ? rt_atomic_load(&request->state) : LELY_RTT_SDO_REQUEST_NEW;
+
+    if (!request || state == LELY_RTT_SDO_REQUEST_NEW || !request->runtime)
+        return -RT_EINVAL;
+    if (state == LELY_RTT_SDO_REQUEST_DONE)
+        return -RT_EBUSY;
+
+    /*
+     * The queued cancel carries only stable identity values, not request*. If
+     * the transfer wins the race and the caller destroys the completed request
+     * before owner dispatch reaches this command, no stale request pointer is
+     * left in the command queue.
+     */
+    rt_memset(&command, 0, sizeof(command));
+    command.type = LELY_RTT_MASTER_COMMAND_SDO_CANCEL;
+    command.data.sdo_cancel.node_id = request->node_id;
+    command.data.sdo_cancel.request_id = request->request_id;
+    return lely_rtt_master_command_post(request->runtime, &command);
 }
 
 /**
@@ -611,8 +662,17 @@ lely_rtt_master_sdo_dispatch(struct lely_rtt_runtime *runtime,
     rt_atomic_store(&request->state, LELY_RTT_SDO_REQUEST_ACTIVE);
 
     if (request->operation == LELY_RTT_SDO_UPLOAD) {
-        result = co_csdo_up_req(sdo, request->index, request->subindex,
-                &lely_rtt_master_sdo_up_con, request);
+        if (request->block_transfer) {
+            result = co_csdo_blk_up_req(sdo, request->index, request->subindex,
+                    request->block_pst, &lely_rtt_master_sdo_up_con, request);
+        } else {
+            result = co_csdo_up_req(sdo, request->index, request->subindex,
+                    &lely_rtt_master_sdo_up_con, request);
+        }
+    } else if (request->block_transfer) {
+        result = co_csdo_blk_dn_req(sdo, request->index, request->subindex,
+                request->buffer, request->size, &lely_rtt_master_sdo_dn_con,
+                request);
     } else {
         result = co_csdo_dn_req(sdo, request->index, request->subindex,
                 request->buffer, request->size, &lely_rtt_master_sdo_dn_con,
@@ -624,6 +684,39 @@ lely_rtt_master_sdo_dispatch(struct lely_rtt_runtime *runtime,
         runtime->sdo_stop_pending[request->node_id] = RT_TRUE;
         lely_rtt_master_sdo_complete(request,
                 LELY_RTT_SDO_COMPLETION_LOCAL_ERROR, -RT_ERROR, 0);
+    }
+}
+
+void
+lely_rtt_master_sdo_cancel_dispatch(struct lely_rtt_runtime *runtime,
+        rt_uint8_t node_id, rt_uint32_t request_id)
+{
+    lely_rtt_sdo_request_t *request;
+    co_csdo_t *sdo;
+
+    if (!runtime || !node_id || node_id > CO_NUM_NODES)
+        return;
+
+    request = runtime->sdo_active[node_id];
+    if (!request || request->request_id != request_id)
+        return;
+
+    sdo = runtime->sdo_clients[node_id];
+    request->cancel_requested = RT_TRUE;
+
+    /*
+     * Frozen Lely co_csdo_abort_req() invokes the transfer confirmation before
+     * returning. The confirmation clears sdo_active and marks stop_pending, so
+     * request must not be dereferenced after this call if it woke its owner.
+     */
+    if (sdo && !co_csdo_is_idle(sdo) && !co_csdo_is_stopped(sdo))
+        co_csdo_abort_req(sdo, CO_SDO_AC_NO_SDO);
+
+    if (runtime->sdo_active[node_id] == request) {
+        runtime->sdo_active[node_id] = RT_NULL;
+        runtime->sdo_stop_pending[node_id] = RT_TRUE;
+        lely_rtt_master_sdo_complete(request, LELY_RTT_SDO_COMPLETION_CANCELED,
+                RT_EOK, CO_SDO_AC_NO_SDO);
     }
 }
 

@@ -8,6 +8,7 @@
  * 2026-09-05     wdfk-prog         correct B4 role to an NMT master runtime
  * 2026-09-05     wdfk-prog         add Master NMT/SDO command APIs for MSH
  * 2026-09-05     wdfk-prog         add NMT configuration, local OD and TIME APIs
+ * 2026-09-06     wdfk-prog         add block Client-SDO and explicit cancellation APIs
  * 2026-09-06     wdfk-prog         clarify CFG restore and TIME lifetime contracts
  * 2026-09-06     wdfk-prog         document snapshot reader scheduling contract
  * 2026-09-06     wdfk-prog         add B5.2 TPDO and B6 EMCY application APIs
@@ -708,6 +709,23 @@ rt_err_t lely_rtt_sdo_request_get_result(
         struct lely_rtt_sdo_result *result);
 
 /**
+ * @brief Request cancellation of a queued or active application SDO transfer.
+ *
+ * Cancellation is serialized through the same owner queue as SDO dispatch.
+ * RT_EOK means the cancel command was accepted, not that it won a race with
+ * remote completion. The terminal result returned by
+ * lely_rtt_sdo_request_get_result() is authoritative. A successful cancel is
+ * reported as LELY_RTT_SDO_COMPLETION_CANCELED and uses the same CiA 301
+ * connection-unavailable abort used by runtime/NMT teardown.
+ *
+ * @param request Posted request object that is still queued or active.
+ * @return RT_EOK when the cancel command is queued, -RT_EBUSY if the request
+ *         is already terminal, -RT_EINVAL for a fresh/invalid request, or an
+ *         RT message-queue admission error.
+ */
+rt_err_t lely_rtt_sdo_request_cancel(lely_rtt_sdo_request_t *request);
+
+/**
  * @brief Queue an SDO upload (remote object read).
  *
  * The owner lazily creates an application-owned Client-SDO using the CiA 301
@@ -752,6 +770,54 @@ rt_err_t lely_rtt_runtime_post_sdo_upload(lely_rtt_runtime_t *runtime,
  *         RT message-queue error. Remote SDO failures are reported in result.
  */
 rt_err_t lely_rtt_runtime_post_sdo_download(lely_rtt_runtime_t *runtime,
+        lely_rtt_sdo_request_t *request, rt_uint8_t node_id,
+        rt_uint16_t index, rt_uint8_t subindex, const void *data,
+        rt_size_t size, rt_uint32_t timeout_ms);
+
+/**
+ * @brief Queue a Client-SDO block upload (remote object read).
+ *
+ * The returned payload has the same request-owned lifetime as a normal upload.
+ * A large block upload therefore requires enough RT-Thread heap to copy the
+ * completed remote value before the request is published as done.
+ *
+ * @param runtime Started runtime with a configured local NMT Master.
+ * @param request Fresh single-use request object.
+ * @param node_id Remote Node-ID in the range 1..127; the local Master Node-ID
+ *                is rejected.
+ * @param index Remote object dictionary index.
+ * @param subindex Remote object dictionary sub-index.
+ * @param pst CiA 301 block-upload protocol switch threshold; 0 disables the
+ *            size-based switch to the regular upload protocol.
+ * @param timeout_ms CSDO protocol timeout in milliseconds; 1..INT_MAX.
+ * @return RT_EOK when queued; otherwise an argument, admission, allocation, or
+ *         RT message-queue error. Remote SDO failures are reported in result.
+ */
+rt_err_t lely_rtt_runtime_post_sdo_block_upload(lely_rtt_runtime_t *runtime,
+        lely_rtt_sdo_request_t *request, rt_uint8_t node_id,
+        rt_uint16_t index, rt_uint8_t subindex, rt_uint8_t pst,
+        rt_uint32_t timeout_ms);
+
+/**
+ * @brief Queue a Client-SDO block download (remote object write).
+ *
+ * The input bytes are copied before this function returns, matching the normal
+ * download ownership contract; the caller may release its source buffer after
+ * a successful post.
+ *
+ * @param runtime Started runtime with a configured local NMT Master.
+ * @param request Fresh single-use request object.
+ * @param node_id Remote Node-ID in the range 1..127; the local Master Node-ID
+ *                is rejected.
+ * @param index Remote object dictionary index.
+ * @param subindex Remote object dictionary sub-index.
+ * @param data Bytes to download; copied by the post call.
+ * @param size Number of bytes in data; must be non-zero.
+ * @param timeout_ms CSDO protocol timeout in milliseconds; 1..INT_MAX.
+ * @return RT_EOK when queued; otherwise an argument, admission, allocation, or
+ *         RT message-queue error. Remote SDO failures are reported in result.
+ */
+rt_err_t lely_rtt_runtime_post_sdo_block_download(lely_rtt_runtime_t *runtime,
         lely_rtt_sdo_request_t *request, rt_uint8_t node_id,
         rt_uint16_t index, rt_uint8_t subindex, const void *data,
         rt_size_t size, rt_uint32_t timeout_ms);
