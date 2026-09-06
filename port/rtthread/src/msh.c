@@ -7,6 +7,7 @@
  * 2026-09-05     wdfk-prog         expose configuration, local OD and TIME commands
  * 2026-09-06     wdfk-prog         clarify unsupported CFG restore diagnostic
  * 2026-09-06     wdfk-prog         expose TPDO trigger and EMCY diagnostics
+ * 2026-09-06     wdfk-prog         avoid long-long formatting in TIME status
  */
 
 /**
@@ -499,10 +500,24 @@ lely_rtt_msh_time(int argc, char **argv)
             rt_kprintf("time: no received TIME value\n");
         else if (err != RT_EOK)
             rt_kprintf("co: TIME snapshot failed (%d)\n", err);
-        else
-            rt_kprintf("time: unix=%lld.%09d seq=%u\n",
-                    (long long)value.seconds, (int)value.nanoseconds,
-                    (unsigned int)value.sequence);
+        else {
+            const rt_uint64_t seconds = (rt_uint64_t)value.seconds;
+            const unsigned int seconds_hi =
+                    (unsigned int)(seconds / 1000000000u);
+            const unsigned int seconds_lo =
+                    (unsigned int)(seconds % 1000000000u);
+
+            /* Avoid %ll: some RT-Thread BSPs omit long-long formatter support. */
+            if (seconds_hi)
+                rt_kprintf("time: unix=%u%09u.%09u seq=%u\n",
+                        seconds_hi, seconds_lo,
+                        (unsigned int)value.nanoseconds,
+                        (unsigned int)value.sequence);
+            else
+                rt_kprintf("time: unix=%u.%09u seq=%u\n", seconds_lo,
+                        (unsigned int)value.nanoseconds,
+                        (unsigned int)value.sequence);
+        }
         return;
     }
 

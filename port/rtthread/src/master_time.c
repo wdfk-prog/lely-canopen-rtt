@@ -6,6 +6,7 @@
  * 2026-09-05     wdfk-prog         first version
  * 2026-09-06     wdfk-prog         guard TIME control by service lifetime
  * 2026-09-06     wdfk-prog         avoid snapshot retry priority livelock
+ * 2026-09-06     wdfk-prog         preserve foreign TIME indication ownership
  */
 
 /**
@@ -101,6 +102,8 @@ rt_err_t
 lely_rtt_master_time_bind(struct lely_rtt_runtime *runtime)
 {
     co_time_t *time;
+    co_time_ind_t *ind = RT_NULL;
+    void *data = RT_NULL;
 
     if (!runtime || !runtime->master_nmt)
         return -RT_EINVAL;
@@ -111,6 +114,13 @@ lely_rtt_master_time_bind(struct lely_rtt_runtime *runtime)
         return -RT_ERROR;
     }
 
+    /* TIME has one indication slot; do not steal another consumer's callback. */
+    co_time_get_ind(time, &ind, &data);
+    if (ind && (ind != &lely_rtt_master_time_ind || data != runtime)) {
+        LELY_RTT_LOG_E("TIME indication is already owned by another consumer");
+        return -RT_EBUSY;
+    }
+
     co_time_set_ind(time, &lely_rtt_master_time_ind, runtime);
     return RT_EOK;
 }
@@ -119,12 +129,19 @@ void
 lely_rtt_master_time_unbind(struct lely_rtt_runtime *runtime)
 {
     co_time_t *time;
+    co_time_ind_t *ind = RT_NULL;
+    void *data = RT_NULL;
 
     if (!runtime || !runtime->master_nmt)
         return;
 
     time = co_nmt_get_time(runtime->master_nmt);
-    if (time)
+    if (!time)
+        return;
+
+    /* Never unregister an indication installed after this bridge bound it. */
+    co_time_get_ind(time, &ind, &data);
+    if (ind == &lely_rtt_master_time_ind && data == runtime)
         co_time_set_ind(time, RT_NULL, RT_NULL);
 }
 

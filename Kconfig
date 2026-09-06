@@ -237,8 +237,10 @@ config PKG_LELY_USING_MASTER_SDO
     depends on PKG_LELY_USING_MASTER_COMMAND
     depends on PKG_LELY_USING_CO_CSDO
     help
-        Add request-id based SDO upload/download transactions for remote nodes.
-        The owner lazily creates one application-owned Client-SDO per Node-ID
+        Add request-id based SDO upload/download transactions for remote nodes,
+        including explicit application cancellation and Client-SDO block
+        upload/download. The owner lazily creates one application-owned
+        Client-SDO per Node-ID
         using the CiA 301 predefined SDO connection. It never borrows the NMT
         boot Client-SDO. At most one application transaction may be active per
         remote node.

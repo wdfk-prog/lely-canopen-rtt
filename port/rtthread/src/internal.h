@@ -157,6 +157,7 @@ enum lely_rtt_master_command_type {
     LELY_RTT_MASTER_COMMAND_NMT = 0,
 #if defined(PKG_LELY_USING_MASTER_SDO)
     LELY_RTT_MASTER_COMMAND_SDO,
+    LELY_RTT_MASTER_COMMAND_SDO_CANCEL,
 #endif /* defined(PKG_LELY_USING_MASTER_SDO) */
 #if defined(PKG_LELY_USING_MASTER_NMT_CFG)
     LELY_RTT_MASTER_COMMAND_NMT_CFG,
@@ -187,6 +188,10 @@ struct lely_rtt_master_command {
         struct {
             lely_rtt_sdo_request_t *request;
         } sdo;
+        struct {
+            rt_uint8_t node_id;
+            rt_uint32_t request_id;
+        } sdo_cancel;
 #endif /* defined(PKG_LELY_USING_MASTER_SDO) */
 #if defined(PKG_LELY_USING_MASTER_NMT_CFG)
         struct {
@@ -456,6 +461,9 @@ void lely_rtt_master_time_cancel_queued(
 /** @brief Dispatch one queued SDO request in the owner thread. */
 void lely_rtt_master_sdo_dispatch(struct lely_rtt_runtime *runtime,
         lely_rtt_sdo_request_t *request);
+/** @brief Cancel one posted SDO request by stable identity in the owner thread. */
+void lely_rtt_master_sdo_cancel_dispatch(struct lely_rtt_runtime *runtime,
+        rt_uint8_t node_id, rt_uint32_t request_id);
 /** @brief Stop completed application CSDO receivers after callbacks unwind. */
 void lely_rtt_master_sdo_reap(struct lely_rtt_runtime *runtime);
 /** @brief Complete an SDO request that never reached the owner dispatcher. */

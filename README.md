@@ -219,7 +219,7 @@ co nmt reset-comm <node-id|all>
 
 `queued:` 只表示命令已经进入 owner queue，不表示远端节点已经完成状态切换；真实状态继续使用 `co node <id>` 查询。shutdown 开始后 command admission 关闭，队列中尚未执行的控制请求不会越过 teardown 边界。
 
-可选 `PKG_LELY_USING_MASTER_SDO=y` 增加 M2 的异步 request-id CSDO transaction。每个 remote Node-ID 最多只有一个 application SDO 活跃，请求支持协议 timeout、SDO abort code、completion 和 shutdown cancellation。当前实现为 application 独立创建基于 Node-ID 的 CiA 301 预定义默认 CSDO，不借用 NMT boot CSDO；自定义 CSDO COB-ID 留给后续 Controller 配置模型。MSH 当前仅暴露 CiA 301 标量诊断类型：
+可选 `PKG_LELY_USING_MASTER_SDO=y` 增加 M2 的异步 request-id CSDO transaction。每个 remote Node-ID 最多只有一个 application SDO 活跃，请求支持协议 timeout、SDO abort code、completion、显式 application cancel、Client-SDO block upload/download 和 shutdown cancellation。普通与 block download 都在 post 返回前复制输入数据；block upload 的完成数据仍由 request 持有到 destroy。当前实现为 application 独立创建基于 Node-ID 的 CiA 301 预定义默认 CSDO，不借用 NMT boot CSDO；自定义 CSDO COB-ID 留给后续 Controller 配置模型。MSH 当前仍只暴露 CiA 301 标量普通传输诊断类型，block/cancel 作为 application API 提供：
 
 ```text
 co sdo read  <node> <index> <subindex> <bool|u8|u16|u32|i8|i16|i32> <timeout-ms>
