@@ -1,0 +1,6 @@
+# Known-good Windows dependency set verified with dcf-tools 2.4.2.
+# dcfgen may emit a pkg_resources deprecation warning with this legacy toolchain;
+# the warning is non-fatal when dcfgen --help and generation continue successfully.
+setuptools==81.0.0
+empy==3.3.4
+dcf-tools==2.4.2

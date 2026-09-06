@@ -1,0 +1,32 @@
+# Host-side input for Lely dcfgen.
+#
+# Product policy still to confirm from Issue #3:
+# - the Master's product Node-ID (127 below is an example value),
+# - heartbeat multiplier,
+# - whether Node1 is mandatory,
+# - automatic NMT Start,
+# - automatic Reset Communication.
+#
+# Keep these decisions here. runtime.c must not invent them.
+master:
+  node_id: 127
+  baudrate: 1000
+  heartbeat_consumer: true
+  start: true
+  start_nodes: false
+  start_all_nodes: false
+  reset_all_nodes: false
+  stop_all_nodes: false
+
+options:
+  heartbeat_multiplier: 3.0
+  retry_factor: 0
+
+node1:
+  dcf: ../node1/node1.dcf
+  node_id: 1
+  revision_number: 0x00000001
+  serial_number: 0x00000001
+  boot: true
+  mandatory: false
+  reset_communication: true

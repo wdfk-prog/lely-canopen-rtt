@@ -2,7 +2,7 @@
 
 本目录用于把 Lely CANopen 的纯 C 协议栈移植到 RT-Thread，并保留 Lely 原有的 `ev` 事件执行器与 `io2` 异步 I/O 机制。
 
-当前交付状态是 **B3：RT-Thread I/O runtime**。B2 的 `LELY_NO_THREADS=1` single-owner policy 保持不变，B3 已加入 owner thread、RT tick/passive timer、RT CAN RX/TX、CAN status、可选硬件 filter hook，以及基于 callback refcount drain 的 callback teardown 同步。**尚未执行目标 BSP 编译、目标板运行或 CAN 总线验证，因此不能把源码级实现等同于目标运行通过。**
+当前交付状态为 **B4：本地 CANopen Master + 远端 Node1**。B3 的 `LELY_NO_THREADS=1` single-owner runtime 保持不变；B4 由 Host 将远端 `node1.dcf` 纳入 Master OD 生成链，目标端只实例化 `master_sdev`，并在本地 reset 后强制校验 `co_nmt_is_master()`。**当前仍未执行目标 BSP 编译、目标板运行或 CAN HIL，因此 Boot-up、Heartbeat、Client-SDO、NMT boot 和远端状态恢复仍属于待目标验证项。**
 
 ## 1. 目标架构
 
@@ -42,7 +42,14 @@ RT-Thread 负责系统线程、跨线程 ingress、时间源和 CAN 设备；Lel
 | B1 | Kconfig、SConscript、统一 feature 配置、RT-Thread 源码 allowlist | 已完成 |
 | B2 | `LELY_NO_THREADS` single-owner policy、去 C11 threads/TLS/atomic backend | 已实现，待目标构建/运行验证 |
 | B3 | owner runtime、`io_user_timer`、RT CAN bridge、callback refcount drain、可选 hardware filter hook | 已实现，待目标构建/运行验证 |
-| B4+ | 应用 command ingress、具体 CANopen node 生命周期与目标板验证 | 待实现 |
+| B4.0 | owner thread 内 `co_dev_t` / `co_nmt_t` 生命周期与逆序 teardown | 已实现，待目标验证 |
+| B4.1 | remote `node1.dcf` → `master.yml` → compact Master DCF → static `master_sdev.c` | 已实现，Windows Host 需复跑 |
+| B4.2 | Node1 Boot-up + Heartbeat consumer + NMT boot + Client-SDO identity | 源码路径已接通，待 CAN HIL |
+| B4.3 | Master/CSDO/NMT boot feature/source graph | 已修正，待 BSP build |
+| B4.4 | local/remote NMT state + remote boot result read-only snapshots | 已实现，待目标验证 |
+| M0 | default Master MSH：`co status/node/boot` 只读 snapshot | 已实现，待目标验证 |
+| M1 | Master command ingress + `co nmt ...` | 已实现，待目标验证 |
+| M2 | request-id CSDO transaction + `co sdo read/write` | 已实现，待目标验证 |
 
 ## 3. 目录说明
 
@@ -55,11 +62,16 @@ lely-rtt-vendor/
 ├── NOTICE                          # Lely upstream NOTICE
 │
 ├── upstream/                       # 冻结的 Lely upstream 源码，不直接手工修改
+├── examples/node1/                 # 远端 Node1 DCF 与旧从站生成物 provenance（不进入目标构建）
+├── examples/master_node1/          # Master YAML/DCF/static OD 与主站示例说明
 ├── port/rtthread/                  # RT-Thread 目标适配层
 │   ├── lely_rtt_config.h           # 唯一的 RT-Thread Lely feature policy
 │   ├── include/lely/features.h      # features.h include overlay
-│   ├── include/lely/rtthread/runtime.h # B3 public runtime API
-│   └── src/                         # owner/time/timer/CAN bridge
+│   ├── include/lely/rtthread/runtime.h # B3 lifecycle + B4 Master/snapshot API
+│   └── src/                         # owner/time/timer/CAN bridge + Master control
+│       ├── master_command.c          # M1 跨线程 Master command ingress
+│       ├── master_sdo.c              # M2 owner-thread CSDO transaction
+│       └── msh.c                     # M0/M1/M2 default Master MSH 前端
 │
 ├── metadata/                       # 机器可读的 vendor/build 元数据
 │   ├── UPSTREAM.lock
@@ -67,8 +79,14 @@ lely-rtt-vendor/
 │   ├── VENDOR_MANIFEST.sha256
 │   └── RTTHREAD_SOURCE_ALLOWLIST.txt
 │
-├── tools/                          # vendor 维护工具，不进入目标固件
+├── tools/                          # Host/vendor 维护工具，不进入目标固件
 │   ├── check_vendor.sh
+│   ├── dcf2c.exe                     # Windows x86-64 Lely DCF-to-C 工具
+│   ├── gen_node1_sdev.sh            # 旧 Node1 静态从站 provenance 工具
+│   ├── setup_dcfgen_windows.ps1     # 可选：按已验证版本准备 Windows dcfgen 环境
+│   ├── requirements-dcfgen-windows.txt # dcfgen Windows 固定依赖版本
+│   ├── gen_sdev.ps1                 # Windows 通用 YAML/DCF -> static sdev C/H 生成器
+│   ├── compact_master_dcf.py        # 裁剪 dcfgen 的大 CompactSubObj Master DCF
 │   └── update_lely.sh
 │
 └── docs/
@@ -76,6 +94,7 @@ lely-rtt-vendor/
     ├── B2_RTTHREAD_COMPAT.md        # B2 single-owner/no-thread 策略
     ├── B3_RTTHREAD_IO.md            # B3 owner/CAN/timer/lifecycle 设计
     ├── BUILD_AND_CONFIG.md          # Kconfig/SCons/source allowlist 使用说明
+    ├── DCF_DCF2C_CANOPENEDITOR.md   # DCF 创建、dcf2c 安装/生成与 Node1 provenance
     └── UPSTREAM_MAINTENANCE.md      # upstream 元数据和更新流程
 ```
 
@@ -131,15 +150,86 @@ lely-rtt-vendor/
 PKG_USING_LELY
 ```
 
-启用后，Kconfig 选择 heap、device、CAN、event。Lely 仍以 single-owner 模式编译，不要求 C11 `<threads.h>`、pthread、mutex、condvar、device-IPC completion 或 compiler TLS backend。RT-Thread event 负责 owner wakeup/lifecycle handshake；shutdown 关闭 callback admission 后，用原子 refcount + `rt_thread_mdelay(1)` 等待已经进入的 CAN RX/status 与 one-shot timer callback 退出。
+启用后，Kconfig 选择 heap、device、CAN 和 event。Lely 仍以 single-owner 模式编译，不要求 C11 `<threads.h>`、pthread、mutex、condvar、device-IPC completion 或 compiler TLS backend。RT-Thread event 负责 owner wakeup/lifecycle handshake；shutdown 关闭 callback admission 后，用原子 refcount + `rt_thread_mdelay(1)` 等待已经进入的 CAN RX/status 与 one-shot timer callback 退出。
 
-默认 `PKG_LELY_APP_AUTO_INIT=y` 时，package 参考 CANopenNode-RTT 的 default-instance 模式，在 RT-Thread application init 阶段通过 `INIT_APP_EXPORT()` 自动创建并启动一个 B3 runtime。CAN 设备名、bitrate、owner 线程资源、启动/停止超时和可选 CAN FD 参数都可在 Kconfig 中配置。若应用自行调用 `lely_rtt_runtime_create()/start()`，应关闭该选项，避免同时创建默认 runtime。
+默认 `PKG_LELY_APP_AUTO_INIT=y` 时，package 参考 CANopenNode-RTT 的 default-instance 模式，在 RT-Thread application init 阶段通过 `INIT_APP_EXPORT()` 自动创建并启动 runtime。CAN 设备名、bitrate、owner 线程资源、启动/停止超时和可选 CAN FD 参数都可在 Kconfig 中配置。若应用自行调用 `lely_rtt_runtime_create()/start()`，应关闭该选项，避免同时创建默认 runtime。
 
-注意：B3 的 auto init 自动启动的是 single-owner CAN/time runtime，不会凭空创建具体 CANopen Node。Node-ID、DCF/OD 与 `co_*` 节点生命周期仍属于后续应用集成。
+启用 `PKG_LELY_EXAMPLE_MASTER_NODE1=y` 后，auto-init 会在 `start()` 前通过 `lely_rtt_runtime_configure_master()` 绑定 `examples/master_node1/master_sdev.c`。真正的 `co_dev_create_from_sdev()`、`co_nmt_create()` 和本地 NMT reset 只在 owner thread 内发生；reset 后若 `co_nmt_is_master()==0`，启动直接失败。目标端继续保持 `LELY_NO_CO_DCF=1`，不会把远端 `node1.dcf` 当成本地设备或在 MCU 上解析 DCF。
 
 默认 `PKG_LELY_USING_ULOG=y` 时，package 选择 RT-Thread ULOG，并把 Lely 自身的 `diag()/diag_at()` 统一桥接到 tag `lely`；RT-Thread 适配层使用 tag `lely.rtt`。异步输出仍完全由工程自己的 `ULOG_USING_ASYNC_OUTPUT` 配置负责，package 不创建第二套日志线程或队列。CAN RX/status 与 deadline callback 不直接打印日志，避免在 ISR/driver/timer callback 上引入日志开销。
 
-注意：B3 已实现到源码层，但当前 ZIP 不包含你的实际 BSP/工具链工程，本阶段没有执行目标 SCons build、目标板运行或 CANopen HIL。
+Host 生成链在 **Windows PowerShell** 下执行。项目已经自带 Windows x86-64 的 `tools\dcf2c.exe`；`dcfgen` 由 Python 包 `dcf-tools` 提供。推荐按下面这套已经在 Windows 实机跑通的命令准备环境：
+
+```powershell
+.\tools\dcf2c.exe --help
+py -3 --version
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install --force-reinstall `
+    "setuptools==81.0.0" `
+    "empy==3.3.4" `
+    "dcf-tools==2.4.2"
+.\.venv\Scripts\dcfgen.exe --help
+```
+
+通用入口是 `tools\gen_sdev.ps1`。它支持两种模式：`-Yml` 先调用 `dcfgen` 生成 Master DCF，再调用 `dcf2c`；`-Dcf` 直接把任意 DCF 转成 static sdev C。`-Name` 指定 C 符号和默认 `.c/.h` 文件名，`-OutDir` 指定输出目录。
+
+RT-Thread MCU 上的 Master YAML 必须增加 `-CompactMaster -NoStrings`。Lely `dcfgen` 的标准 Master 模板会为多组 Manager 对象生成 `CompactSubObj=127/254`；目标端 `co_dev_create_from_sdev()` 会把这些 compact entry 展开成动态 `co_sub_t`，在小 MCU 上会造成不必要的 heap 压力。`-CompactMaster` 在 Host 端先调用 `tools\compact_master_dcf.py` 收缩这些范围，`-NoStrings` 再让 `dcf2c` 省略可选对象名称字符串。示例：
+
+```powershell
+# YAML -> DCF + C + H
+.\tools\gen_sdev.ps1 `
+    -Yml .\examples\master_node1\master.yml `
+    -Name master_sdev `
+    -OutDir .\generated\master_node1 `
+    -DcfFileName master.dcf `
+    -RemotePdo `
+    -CompactMaster `
+    -NoStrings
+
+# 已有 DCF -> C + H
+.\tools\gen_sdev.ps1 `
+    -Dcf .\examples\node1\node1.dcf `
+    -Name node1_sdev `
+    -OutDir .\generated\node1
+```
+
+Master+Node1 不再使用专用包装器，统一直接调用 `tools\gen_sdev.ps1`。刷新仓库内 MCU 示例时必须显式传入 `-CompactMaster -NoStrings -NoHeader -MetaFile master_sdev.meta`，并继续使用 8-entry 的 `0x1003` error history 上限和 256 个估算 sub-object 的安全门槛。这样 `master.dcf`、`master_sdev.c` 和 `master_sdev.meta` 都由同一个通用入口维护，而 `master_sdev.h` 仍保留为项目维护的声明头。不要把未经裁剪的 `dcfgen master.dcf` 直接交给 `dcf2c`。`dcfgen --help` 可能打印 `pkg_resources is deprecated` 警告，只要后续命令继续正常执行就不是失败。完整命令和参数见 [DCF、CANopenEditor 与 Lely dcf2c 使用指南](docs/DCF_DCF2C_CANOPENEDITOR.md)。
+
+默认 auto-init Master 可通过 `lely_rtt_runtime_get_default()` 获取只读 ownership 的 runtime handle。应用线程只读取 owner 发布的 `lely_rtt_runtime_get_local_nmt_state()`、`lely_rtt_runtime_get_remote_nmt_state()` 和 `lely_rtt_runtime_get_remote_boot_status()` snapshot，不直接进入 Lely。
+
+### Master MSH 辅助控制
+
+`PKG_LELY_USING_MSH=y` 为 default auto-init runtime 导出单一根命令 `co`。M0 的只读命令完全复用 snapshot API：
+
+```text
+co status
+co node <node-id>
+co boot <node-id>
+```
+
+MSH 不直接访问 `master_nmt/master_dev`。`PKG_LELY_USING_MASTER_COMMAND=y` 才引入每 runtime 的 RT-Thread message queue，并通过 owner event 执行 M1 NMT 控制：
+
+```text
+co nmt start <node-id|all>
+co nmt stop <node-id|all>
+co nmt preop <node-id|all>
+co nmt reset-node <node-id|all>
+co nmt reset-comm <node-id|all>
+```
+
+`queued:` 只表示命令已经进入 owner queue，不表示远端节点已经完成状态切换；真实状态继续使用 `co node <id>` 查询。shutdown 开始后 command admission 关闭，队列中尚未执行的控制请求不会越过 teardown 边界。
+
+可选 `PKG_LELY_USING_MASTER_SDO=y` 增加 M2 的异步 request-id CSDO transaction。每个 remote Node-ID 最多只有一个 application SDO 活跃，请求支持协议 timeout、SDO abort code、completion 和 shutdown cancellation。当前实现为 application 独立创建基于 Node-ID 的 CiA 301 预定义默认 CSDO，不借用 NMT boot CSDO；自定义 CSDO COB-ID 留给后续 Controller 配置模型。MSH 当前仅暴露 CiA 301 标量诊断类型：
+
+```text
+co sdo read  <node> <index> <subindex> <bool|u8|u16|u32|i8|i16|i32> <timeout-ms>
+co sdo write <node> <index> <subindex> <bool|u8|u16|u32|i8|i16|i32> <value> <timeout-ms>
+```
+
+M2 不把 `co_csdo_t *` 暴露给 MSH/application。受控 `stop/reset-node/reset-comm` 会先取消该节点的 application SDO；成功发送 reset 后继续挂起新的 application SDO，直到远端 boot process 完成或状态证据恢复到可进行 SDO 的状态。对于远端自发 Boot-up，owner 会先终止并销毁 application default CSDO，再调用 `co_nmt_on_st()` 让 Lely NMT boot 独占默认 SDO 通道；snapshot 仍在默认 NMT 处理之后发布，且不修改 frozen upstream。M3 的 PDO/SYNC/EMCY 控制 API 本轮没有提前定义。
+
+注意：B4 主站角色与 M0/M1/M2 控制面已经接到源码/配置层，但当前 ZIP 不包含实际 BSP/工具链工程，本阶段没有执行目标 SCons build、目标板运行或 CANopen HIL。
 
 ## B3 RT-Thread I/O runtime
 

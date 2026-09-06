@@ -12,9 +12,9 @@ menuconfig PKG_USING_LELY
 
         Lely is built with LELY_NO_THREADS=1: RT-Thread may still use multiple
         threads, but one dedicated owner thread must serialize all access to
-        Lely EV/IO2/CANopen objects. CAN RX, timer wakeups and application work
-        arriving from other threads or ISR context must first be serialized to
-        that owner thread. RT-Thread event flags wake the owner. During shutdown,
+        Lely EV/IO2/CANopen objects. CAN RX, timer wakeups and CAN status
+        arriving from driver or ISR context must first be serialized to that
+        owner thread. RT-Thread event flags wake the owner. During shutdown,
         an atomic callback refcount is drained with rt_thread_mdelay(1) sleeps so
         cleanup does not busy-spin and does not require the device-IPC completion
         component. This removes the C11 threads, pthread and compiler TLS ABI
@@ -49,6 +49,18 @@ config PKG_LELY_USING_CANFD
         Lely CAN FD data structures and protocol branches; the selected
         RT-Thread CAN driver must also provide compatible CAN FD support.
 
+config PKG_LELY_EXAMPLE_MASTER_NODE1
+    bool "Build the static CANopen Master + remote Node1 example"
+    default n
+    select PKG_LELY_USING_CO_CSDO
+    select PKG_LELY_USING_CO_MASTER
+    select PKG_LELY_USING_CO_NMT_BOOT
+    help
+        Build examples/master_node1/master_sdev.c as the MCU's local CANopen
+        Master object dictionary. examples/node1/node1.dcf remains a Host-side
+        description of remote Node1 and is never instantiated as the MCU's
+        local device. The target does not parse DCF files at runtime.
+
 menuconfig PKG_LELY_APP_AUTO_INIT
     bool "Automatically start Lely CANopen runtime"
     default y
@@ -58,9 +70,10 @@ menuconfig PKG_LELY_APP_AUTO_INIT
         RT-Thread application initialization through INIT_APP_EXPORT(). Disable
         this when the product creates lely_rtt_runtime instances explicitly.
 
-        B3 auto init starts the single-owner EV/IO2/CAN transport runtime only.
-        A concrete CANopen node still needs its DCF/OD and co_* lifecycle in the
-        later application integration layer, so B3 does not invent a Node-ID.
+        Auto init always starts the B3 single-owner EV/IO2/CAN transport.
+        PKG_LELY_EXAMPLE_MASTER_NODE1 additionally binds the generated local
+        Master OD before start; product-specific Master/remote-node policy stays
+        in the Host generation input instead of being invented by runtime.c.
 
 if PKG_LELY_APP_AUTO_INIT
 
@@ -194,6 +207,59 @@ config PKG_LELY_AUTO_INIT_CANFD_LEN_DLC
 endchoice
 
 endif
+
+menu "CANopen Master control plane"
+
+config PKG_LELY_USING_MASTER_COMMAND
+    bool "Enable asynchronous Master command ingress"
+    default n
+    depends on PKG_LELY_USING_CO_MASTER
+    select RT_USING_MESSAGEQUEUE
+    help
+        Add one per-runtime RT-Thread message queue for commands posted from
+        application/MSH threads to the single Lely owner. No non-owner thread
+        is allowed to call Lely CANopen services directly.
+
+config PKG_LELY_MASTER_COMMAND_QUEUE_DEPTH
+    int "Master command queue depth"
+    depends on PKG_LELY_USING_MASTER_COMMAND
+    range 1 64
+    default 8
+    help
+        Maximum copied Master commands waiting for owner dispatch. The default
+        preserves the previous B4 command-queue memory budget while moving the
+        queue to the corrected remote-Master control role. Owner dispatch is
+        bounded by this depth on each command wakeup.
+
+config PKG_LELY_USING_MASTER_SDO
+    bool "Enable asynchronous Master SDO transactions"
+    default n
+    depends on PKG_LELY_USING_MASTER_COMMAND
+    depends on PKG_LELY_USING_CO_CSDO
+    help
+        Add request-id based SDO upload/download transactions for remote nodes.
+        The owner lazily creates one application-owned Client-SDO per Node-ID
+        using the CiA 301 predefined SDO connection. It never borrows the NMT
+        boot Client-SDO. At most one application transaction may be active per
+        remote node.
+        Protocol timeout, abort code, completion and shutdown cancellation are
+        preserved.
+
+config PKG_LELY_USING_MSH
+    bool "Enable CANopen Master MSH commands"
+    default n
+    depends on PKG_LELY_APP_AUTO_INIT
+    depends on PKG_LELY_EXAMPLE_MASTER_NODE1
+    depends on PKG_LELY_USING_CO_MASTER
+    depends on RT_USING_FINSH && FINSH_USING_MSH
+    select PKG_LELY_USING_MASTER_COMMAND
+    help
+        Export one MSH root command named 'co' for the default auto-init Master.
+        status/node/boot read existing snapshots and nmt posts owner commands.
+        When PKG_LELY_USING_MASTER_SDO is also enabled, the same root command
+        exposes scalar SDO read/write diagnostics.
+
+endmenu
 
 menu "CANopen feature selection"
 
