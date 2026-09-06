@@ -7,6 +7,8 @@
  * 2026-09-04     wdfk-prog         add owner CANopen node and command ingress
  * 2026-09-05     wdfk-prog         correct B4 role to a local NMT Master
  * 2026-09-05     wdfk-prog         integrate Master command and SDO ingress
+ * 2026-09-05     wdfk-prog         integrate configuration, local OD and TIME bridges
+ * 2026-09-06     wdfk-prog         retire CFG requests at local NMT barriers
  */
 
 /**
@@ -110,6 +112,12 @@ lely_rtt_master_snapshots_reset(struct lely_rtt_runtime *runtime)
                         LELY_RTT_NMT_STATE_UNAVAILABLE, RT_FALSE));
         rt_atomic_store(&runtime->remote_boot_result[id], 0);
     }
+#if defined(PKG_LELY_USING_LOCAL_OD)
+    lely_rtt_local_od_reset(runtime);
+#endif /* defined(PKG_LELY_USING_LOCAL_OD) */
+#if defined(PKG_LELY_USING_MASTER_TIME)
+    lely_rtt_master_time_reset(runtime);
+#endif /* defined(PKG_LELY_USING_MASTER_TIME) */
 }
 
 /**
@@ -156,6 +164,21 @@ lely_rtt_master_state_ind(co_nmt_t *nmt, co_unsigned8_t id,
 
     if (id == co_nmt_get_id(nmt)) {
         rt_atomic_store(&runtime->local_nmt_state, state);
+#if defined(PKG_LELY_USING_MASTER_NMT_CFG)
+        /* The helper only retires states emitted after co_nmt_slaves_fini(). */
+        lely_rtt_master_cfg_on_local_nmt_state(runtime, state);
+#endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
+#if defined(PKG_LELY_USING_MASTER_TIME)
+        /*
+         * Lely destroys TIME when local NMT leaves Pre-op/Operational and
+         * recreates it before publishing the next usable state indication.
+         * Reattach our application snapshot callback to that new service.
+         */
+        if ((state == CO_NMT_ST_PREOP || state == CO_NMT_ST_START)
+                && lely_rtt_master_time_bind(runtime) != RT_EOK)
+            LELY_RTT_LOG_W("TIME bridge rebind failed after local NMT state 0x%02x",
+                    (unsigned int)state);
+#endif /* defined(PKG_LELY_USING_MASTER_TIME) */
         return;
     }
     if (!id || id > CO_NUM_NODES)
@@ -303,6 +326,26 @@ lely_rtt_master_init(struct lely_rtt_runtime *runtime)
         return -RT_ERROR;
     }
 
+#if defined(PKG_LELY_USING_LOCAL_OD)
+    {
+        rt_err_t err = lely_rtt_local_od_bind(runtime);
+
+        if (err != RT_EOK) {
+            LELY_RTT_LOG_E("local OD bridge bind failed: %d", err);
+            return err;
+        }
+    }
+#endif /* defined(PKG_LELY_USING_LOCAL_OD) */
+
+#if defined(PKG_LELY_USING_MASTER_TIME)
+    {
+        rt_err_t err = lely_rtt_master_time_bind(runtime);
+
+        if (err != RT_EOK)
+            return err;
+    }
+#endif /* defined(PKG_LELY_USING_MASTER_TIME) */
+
     rt_atomic_store(&runtime->local_node_id, co_nmt_get_id(runtime->master_nmt));
     rt_atomic_store(&runtime->local_nmt_state,
             co_nmt_get_st(runtime->master_nmt) & ~CO_NMT_ST_TOGGLE);
@@ -314,6 +357,11 @@ lely_rtt_master_init(struct lely_rtt_runtime *runtime)
 
 /**
  * @brief Destroy the optional local Master before its CAN network disappears.
+ *
+ * Manual configuration callbacks may retain caller-owned request pointers.
+ * Mark them canceled before destroying NMT, but publish completion only after
+ * co_nmt_destroy() establishes that no configuration callback can run again.
+ *
  * @param runtime Runtime instance owned by the current owner thread.
  */
 static void
@@ -323,8 +371,20 @@ lely_rtt_master_fini(struct lely_rtt_runtime *runtime)
         return;
 
     if (runtime->master_nmt) {
+#if defined(PKG_LELY_USING_LOCAL_OD)
+        lely_rtt_local_od_unbind(runtime);
+#endif /* defined(PKG_LELY_USING_LOCAL_OD) */
+#if defined(PKG_LELY_USING_MASTER_TIME)
+        lely_rtt_master_time_unbind(runtime);
+#endif /* defined(PKG_LELY_USING_MASTER_TIME) */
+#if defined(PKG_LELY_USING_MASTER_NMT_CFG)
+        lely_rtt_master_cfg_prepare_nmt_destroy(runtime);
+#endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
         co_nmt_destroy(runtime->master_nmt);
         runtime->master_nmt = RT_NULL;
+#if defined(PKG_LELY_USING_MASTER_NMT_CFG)
+        lely_rtt_master_cfg_after_nmt_destroy(runtime);
+#endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
     }
     if (runtime->master_dev) {
         co_dev_destroy(runtime->master_dev);
@@ -459,7 +519,10 @@ lely_rtt_owner_cleanup(struct lely_rtt_runtime *runtime)
     lely_rtt_callbacks_quiesce_begin(runtime);
 
 #if defined(PKG_LELY_USING_MASTER_COMMAND)
-    /* Queued SDO requests are canceled and active Client-SDOs stop before CAN. */
+    /*
+     * Close queued control work before detaching CAN. Active NMT configuration
+     * requests remain pinned until lely_rtt_master_fini() destroys NMT below.
+     */
     lely_rtt_master_command_fini(runtime);
 #endif /* defined(PKG_LELY_USING_MASTER_COMMAND) */
 

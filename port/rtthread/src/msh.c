@@ -4,14 +4,17 @@
  * Change Logs:
  * Date           Author            Notes
  * 2026-09-05     wdfk-prog         first version
+ * 2026-09-05     wdfk-prog         expose configuration, local OD and TIME commands
+ * 2026-09-06     wdfk-prog         clarify unsupported CFG restore diagnostic
  */
 
 /**
  * @file msh.c
  * @brief RT-Thread MSH front-end for the default CANopen Master runtime.
  *
- * This file only parses shell arguments, reads public snapshots and posts
- * public runtime commands. It never dereferences owner-only Lely objects.
+ * This file only parses shell arguments and calls public runtime APIs, which
+ * may read snapshots, post asynchronous commands, or synchronously cross the
+ * owner queue. It never dereferences owner-only Lely objects.
  *
  * @author wdfk-prog
  */
@@ -28,7 +31,7 @@
 
 #if defined(PKG_LELY_USING_MSH)
 
-#if defined(PKG_LELY_USING_MASTER_SDO)
+#if defined(PKG_LELY_USING_MASTER_SDO) || defined(PKG_LELY_USING_LOCAL_OD)
 struct lely_rtt_msh_scalar_type {
     const char *name;
     rt_uint8_t size;
@@ -45,7 +48,7 @@ static const struct lely_rtt_msh_scalar_type lely_rtt_msh_scalar_types[] = {
     { "i16", 2, RT_TRUE, RT_FALSE },
     { "i32", 4, RT_TRUE, RT_FALSE },
 };
-#endif /* defined(PKG_LELY_USING_MASTER_SDO) */
+#endif /* defined(PKG_LELY_USING_MASTER_SDO) || defined(PKG_LELY_USING_LOCAL_OD) */
 
 /** @brief Convert an NMT state byte to the shell vocabulary. */
 static const char *
@@ -125,6 +128,50 @@ lely_rtt_msh_parse_u32(const char *text, rt_uint32_t max_value,
     return RT_TRUE;
 }
 
+#if defined(PKG_LELY_USING_MASTER_TIME)
+/** @brief Parse one unsigned 64-bit decimal/hex value without libc strtoull(). */
+static rt_bool_t
+lely_rtt_msh_parse_u64(const char *text, rt_uint64_t max_value,
+        rt_uint64_t *value)
+{
+    const char *cursor = text;
+    rt_uint64_t parsed = 0;
+    rt_uint64_t base = 10;
+    rt_bool_t have_digit = RT_FALSE;
+
+    if (!text || !*text || !value)
+        return RT_FALSE;
+    if (cursor[0] == '0' && (cursor[1] == 'x' || cursor[1] == 'X')) {
+        base = 16;
+        cursor += 2;
+    }
+
+    for (; *cursor; cursor++) {
+        rt_uint64_t digit;
+
+        if (*cursor >= '0' && *cursor <= '9')
+            digit = (rt_uint64_t)(*cursor - '0');
+        else if (base == 16 && *cursor >= 'a' && *cursor <= 'f')
+            digit = (rt_uint64_t)(*cursor - 'a') + 10u;
+        else if (base == 16 && *cursor >= 'A' && *cursor <= 'F')
+            digit = (rt_uint64_t)(*cursor - 'A') + 10u;
+        else
+            return RT_FALSE;
+
+        if (digit >= base || digit > max_value
+                || parsed > (max_value - digit) / base)
+            return RT_FALSE;
+        parsed = parsed * base + digit;
+        have_digit = RT_TRUE;
+    }
+
+    if (!have_digit)
+        return RT_FALSE;
+    *value = parsed;
+    return RT_TRUE;
+}
+#endif /* defined(PKG_LELY_USING_MASTER_TIME) */
+
 /** @brief Parse one remote node-ID; zero is deliberately not accepted. */
 static rt_bool_t
 lely_rtt_msh_parse_node(const char *text, rt_uint8_t *node_id)
@@ -150,8 +197,8 @@ lely_rtt_msh_parse_nmt_target(const char *text, rt_uint8_t *node_id)
     return lely_rtt_msh_parse_node(text, node_id);
 }
 
-#if defined(PKG_LELY_USING_MASTER_SDO)
-/** @brief Look up one scalar SDO shell data type. */
+#if defined(PKG_LELY_USING_MASTER_SDO) || defined(PKG_LELY_USING_LOCAL_OD)
+/** @brief Look up one scalar shell data type. */
 static const struct lely_rtt_msh_scalar_type *
 lely_rtt_msh_find_scalar_type(const char *name)
 {
@@ -166,7 +213,7 @@ lely_rtt_msh_find_scalar_type(const char *name)
     }
     return RT_NULL;
 }
-#endif /* defined(PKG_LELY_USING_MASTER_SDO) */
+#endif /* defined(PKG_LELY_USING_MASTER_SDO) || defined(PKG_LELY_USING_LOCAL_OD) */
 
 /** @brief Print the commands available in the current Kconfig profile. */
 static void
@@ -178,11 +225,26 @@ lely_rtt_msh_help(void)
 #if defined(PKG_LELY_USING_MASTER_COMMAND)
     rt_kprintf("co nmt start|stop|preop|reset-node|reset-comm <node-id|all>\n");
 #endif /* defined(PKG_LELY_USING_MASTER_COMMAND) */
+#if defined(PKG_LELY_USING_MASTER_NMT_CFG)
+    rt_kprintf("co cfg <node-id> <timeout-ms>\n");
+#endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
+#if defined(PKG_LELY_USING_LOCAL_OD)
+    rt_kprintf("co od status\n");
+    rt_kprintf("co od read <index> <subindex> <type>\n");
+    rt_kprintf("co od write <index> <subindex> <type> <value>\n");
+#endif /* defined(PKG_LELY_USING_LOCAL_OD) */
+#if defined(PKG_LELY_USING_MASTER_TIME)
+    rt_kprintf("co time status\n");
+    rt_kprintf("co time mode off|consumer|producer|both\n");
+    rt_kprintf("co time send <unix-sec> <nanoseconds>\n");
+#endif /* defined(PKG_LELY_USING_MASTER_TIME) */
 #if defined(PKG_LELY_USING_MASTER_SDO)
     rt_kprintf("co sdo read <node> <index> <subindex> <type> <timeout-ms>\n");
     rt_kprintf("co sdo write <node> <index> <subindex> <type> <value> <timeout-ms>\n");
-    rt_kprintf("  type: bool|u8|u16|u32|i8|i16|i32\n");
 #endif /* defined(PKG_LELY_USING_MASTER_SDO) */
+#if defined(PKG_LELY_USING_MASTER_SDO) || defined(PKG_LELY_USING_LOCAL_OD)
+    rt_kprintf("  type: bool|u8|u16|u32|i8|i16|i32\n");
+#endif /* defined(PKG_LELY_USING_MASTER_SDO) || defined(PKG_LELY_USING_LOCAL_OD) */
 }
 
 /** @brief Get the auto-init runtime or print the common not-ready diagnostic. */
@@ -344,7 +406,136 @@ lely_rtt_msh_nmt(const char *command_text, const char *target_text)
 }
 #endif /* defined(PKG_LELY_USING_MASTER_COMMAND) */
 
-#if defined(PKG_LELY_USING_MASTER_SDO)
+#if defined(PKG_LELY_USING_MASTER_NMT_CFG)
+static void
+lely_rtt_msh_cfg(const char *node_text, const char *timeout_text)
+{
+    struct lely_rtt_nmt_cfg_result result;
+    lely_rtt_runtime_t *runtime;
+    rt_uint32_t timeout_ms;
+    rt_uint8_t node_id;
+    rt_err_t err;
+
+    if (!lely_rtt_msh_parse_node(node_text, &node_id)
+            || !lely_rtt_msh_parse_u32(timeout_text, INT_MAX, &timeout_ms)
+            || !timeout_ms) {
+        rt_kprintf("co: invalid configuration node or timeout\n");
+        return;
+    }
+
+    runtime = lely_rtt_msh_runtime();
+    if (!runtime)
+        return;
+
+    err = lely_rtt_runtime_nmt_configure(runtime, node_id, timeout_ms, &result);
+    if (err != RT_EOK) {
+        rt_kprintf("co: configuration request failed (%d)\n", err);
+        return;
+    }
+
+    if (result.status == LELY_RTT_NMT_CFG_COMPLETION_OK) {
+        rt_kprintf("node %u: configuration ok\n", (unsigned int)node_id);
+    } else if (result.status == LELY_RTT_NMT_CFG_COMPLETION_ABORT) {
+        rt_kprintf("node %u: configuration abort=0x%08x\n",
+                (unsigned int)node_id, (unsigned int)result.abort_code);
+    } else if (result.status == LELY_RTT_NMT_CFG_COMPLETION_CANCELED) {
+        rt_kprintf("node %u: configuration canceled", (unsigned int)node_id);
+        if (result.abort_code)
+            rt_kprintf(" abort=0x%08x", (unsigned int)result.abort_code);
+        rt_kprintf("\n");
+    } else {
+        rt_kprintf("node %u: configuration local error=%d",
+                (unsigned int)node_id, result.local_error);
+        if (result.local_error == -RT_ENOSYS)
+            rt_kprintf(" (no supported 0x1F22/cfg_ind work; 0x1F8A restore unsupported)");
+        rt_kprintf("\n");
+    }
+}
+#endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
+
+#if defined(PKG_LELY_USING_MASTER_TIME)
+static rt_bool_t
+lely_rtt_msh_time_roles(const char *text, rt_uint8_t *roles)
+{
+    if (!text || !roles)
+        return RT_FALSE;
+    if (!strcmp(text, "off"))
+        *roles = 0;
+    else if (!strcmp(text, "consumer"))
+        *roles = LELY_RTT_TIME_ROLE_CONSUMER;
+    else if (!strcmp(text, "producer"))
+        *roles = LELY_RTT_TIME_ROLE_PRODUCER;
+    else if (!strcmp(text, "both"))
+        *roles = LELY_RTT_TIME_ROLE_CONSUMER | LELY_RTT_TIME_ROLE_PRODUCER;
+    else
+        return RT_FALSE;
+    return RT_TRUE;
+}
+
+static void
+lely_rtt_msh_time(int argc, char **argv)
+{
+    lely_rtt_runtime_t *runtime = lely_rtt_msh_runtime();
+    rt_err_t err;
+
+    if (!runtime)
+        return;
+
+    if (argc == 3 && !strcmp(argv[2], "status")) {
+        struct lely_rtt_time_value value;
+
+        err = lely_rtt_runtime_get_time(runtime, &value);
+        if (err == -RT_EBUSY) {
+            rt_kprintf("time: no received TIME value\n");
+        } else if (err != RT_EOK) {
+            rt_kprintf("co: TIME snapshot failed (%d)\n", err);
+        } else {
+            rt_kprintf("time: unix=%lld.%09d seq=%u\n",
+                    (long long)value.seconds, (int)value.nanoseconds,
+                    (unsigned int)value.sequence);
+        }
+        return;
+    }
+
+    if (argc == 4 && !strcmp(argv[2], "mode")) {
+        rt_uint8_t roles;
+
+        if (!lely_rtt_msh_time_roles(argv[3], &roles)) {
+            rt_kprintf("co: TIME mode must be off|consumer|producer|both\n");
+            return;
+        }
+        err = lely_rtt_runtime_time_configure(runtime, roles);
+        if (err != RT_EOK)
+            rt_kprintf("co: TIME mode update failed (%d)\n", err);
+        else
+            rt_kprintf("time: mode=%s\n", argv[3]);
+        return;
+    }
+
+    if (argc == 5 && !strcmp(argv[2], "send")) {
+        rt_uint64_t seconds;
+        rt_uint32_t nanoseconds;
+
+        if (!lely_rtt_msh_parse_u64(argv[3],
+                    (rt_uint64_t)0x7fffffffffffffffULL, &seconds)
+                || !lely_rtt_msh_parse_u32(argv[4], 999999999u, &nanoseconds)) {
+            rt_kprintf("co: invalid TIME timestamp\n");
+            return;
+        }
+        err = lely_rtt_runtime_time_send(runtime, (rt_int64_t)seconds,
+                (rt_int32_t)nanoseconds);
+        if (err != RT_EOK)
+            rt_kprintf("co: TIME send failed (%d)\n", err);
+        else
+            rt_kprintf("time: sent\n");
+        return;
+    }
+
+    lely_rtt_msh_help();
+}
+#endif /* defined(PKG_LELY_USING_MASTER_TIME) */
+
+#if defined(PKG_LELY_USING_MASTER_SDO) || defined(PKG_LELY_USING_LOCAL_OD)
 /** @brief Encode a shell scalar in CiA 301 little-endian transfer order. */
 static rt_bool_t
 lely_rtt_msh_encode_scalar(const struct lely_rtt_msh_scalar_type *type,
@@ -429,7 +620,104 @@ lely_rtt_msh_print_scalar(const struct lely_rtt_msh_scalar_type *type,
     else
         rt_kprintf("0x%08x)", (unsigned int)raw);
 }
+#endif /* defined(PKG_LELY_USING_MASTER_SDO) || defined(PKG_LELY_USING_LOCAL_OD) */
 
+#if defined(PKG_LELY_USING_LOCAL_OD)
+static void
+lely_rtt_msh_od(int argc, char **argv)
+{
+    const struct lely_rtt_msh_scalar_type *type;
+    lely_rtt_runtime_t *runtime;
+    rt_uint32_t index;
+    rt_uint32_t subindex;
+    rt_uint8_t data[4] = { 0 };
+    rt_bool_t write;
+    rt_err_t err;
+
+    runtime = lely_rtt_msh_runtime();
+    if (!runtime)
+        return;
+
+    if (argc == 3 && !strcmp(argv[2], "status")) {
+        struct lely_rtt_local_od_change change;
+        const char *source;
+
+        err = lely_rtt_runtime_get_local_od_change(runtime, &change);
+        if (err == -RT_EBUSY) {
+            rt_kprintf("od: no observed write\n");
+            return;
+        }
+        if (err != RT_EOK) {
+            rt_kprintf("co: OD status failed (%d)\n", err);
+            return;
+        }
+
+        source = change.source == LELY_RTT_LOCAL_OD_CHANGE_LOCAL_API
+                ? "local-api" : "protocol";
+        rt_kprintf("od: last=0x%04x:%02x size=%u source=%s seq=%u\n",
+                (unsigned int)change.index, (unsigned int)change.subindex,
+                (unsigned int)change.size, source,
+                (unsigned int)change.sequence);
+        return;
+    }
+
+    if (argc != 6 && argc != 7) {
+        lely_rtt_msh_help();
+        return;
+    }
+    if (!strcmp(argv[2], "read"))
+        write = RT_FALSE;
+    else if (!strcmp(argv[2], "write"))
+        write = RT_TRUE;
+    else {
+        rt_kprintf("co: OD command must be read or write\n");
+        return;
+    }
+    if ((!write && argc != 6) || (write && argc != 7)
+            || !lely_rtt_msh_parse_u32(argv[3], 0xffffu, &index)
+            || !lely_rtt_msh_parse_u32(argv[4], 0xffu, &subindex)) {
+        rt_kprintf("co: invalid OD index/subindex\n");
+        return;
+    }
+
+    type = lely_rtt_msh_find_scalar_type(argv[5]);
+    if (!type) {
+        rt_kprintf("co: unsupported OD type\n");
+        return;
+    }
+    if (write && !lely_rtt_msh_encode_scalar(type, argv[6], data)) {
+        rt_kprintf("co: invalid OD value\n");
+        return;
+    }
+
+    if (write) {
+        err = lely_rtt_runtime_local_od_write(runtime, (rt_uint16_t)index,
+                (rt_uint8_t)subindex, data, type->size);
+        if (err != RT_EOK)
+            rt_kprintf("co: OD write failed (%d)\n", err);
+        else
+            rt_kprintf("od 0x%04x:%02x: write ok\n",
+                    (unsigned int)index, (unsigned int)subindex);
+    } else {
+        void *value = RT_NULL;
+        rt_size_t size = 0;
+
+        err = lely_rtt_runtime_local_od_read(runtime, (rt_uint16_t)index,
+                (rt_uint8_t)subindex, &value, &size);
+        if (err != RT_EOK) {
+            rt_kprintf("co: OD read failed (%d)\n", err);
+            return;
+        }
+        rt_kprintf("od 0x%04x:%02x: ",
+                (unsigned int)index, (unsigned int)subindex);
+        lely_rtt_msh_print_scalar(type, value, size);
+        rt_kprintf("\n");
+        lely_rtt_local_od_free(value);
+    }
+}
+#endif /* defined(PKG_LELY_USING_LOCAL_OD) */
+
+#if defined(PKG_LELY_USING_MASTER_SDO)
 static void
 lely_rtt_msh_sdo_result(lely_rtt_sdo_request_t *request,
         const struct lely_rtt_msh_scalar_type *type)
@@ -590,6 +878,24 @@ co(int argc, char **argv)
         return 0;
     }
 #endif /* defined(PKG_LELY_USING_MASTER_COMMAND) */
+#if defined(PKG_LELY_USING_MASTER_NMT_CFG)
+    if (argc == 4 && !strcmp(argv[1], "cfg")) {
+        lely_rtt_msh_cfg(argv[2], argv[3]);
+        return 0;
+    }
+#endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
+#if defined(PKG_LELY_USING_LOCAL_OD)
+    if (argc >= 2 && !strcmp(argv[1], "od")) {
+        lely_rtt_msh_od(argc, argv);
+        return 0;
+    }
+#endif /* defined(PKG_LELY_USING_LOCAL_OD) */
+#if defined(PKG_LELY_USING_MASTER_TIME)
+    if (argc >= 2 && !strcmp(argv[1], "time")) {
+        lely_rtt_msh_time(argc, argv);
+        return 0;
+    }
+#endif /* defined(PKG_LELY_USING_MASTER_TIME) */
 #if defined(PKG_LELY_USING_MASTER_SDO)
     if (argc >= 2 && !strcmp(argv[1], "sdo")) {
         lely_rtt_msh_sdo(argc, argv);

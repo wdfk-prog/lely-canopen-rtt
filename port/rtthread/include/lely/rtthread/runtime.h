@@ -7,6 +7,9 @@
  * 2026-09-04     wdfk-prog         add CANopen node and command ingress APIs
  * 2026-09-05     wdfk-prog         correct B4 role to an NMT master runtime
  * 2026-09-05     wdfk-prog         add Master NMT/SDO command APIs for MSH
+ * 2026-09-05     wdfk-prog         add NMT configuration, local OD and TIME APIs
+ * 2026-09-06     wdfk-prog         clarify CFG restore and TIME lifetime contracts
+ * 2026-09-06     wdfk-prog         document snapshot reader scheduling contract
  */
 
 /**
@@ -55,6 +58,38 @@ enum lely_rtt_nmt_command {
     LELY_RTT_NMT_COMMAND_RESET_COMM, /**< Reset communication parameters only. */
 };
 #endif /* defined(PKG_LELY_USING_MASTER_COMMAND) */
+
+#if defined(PKG_LELY_USING_MASTER_NMT_CFG)
+/** @brief Terminal classification of one manual NMT configuration request. */
+enum lely_rtt_nmt_cfg_completion_status {
+    LELY_RTT_NMT_CFG_COMPLETION_OK = 0,
+    LELY_RTT_NMT_CFG_COMPLETION_ABORT,
+    LELY_RTT_NMT_CFG_COMPLETION_CANCELED,
+    LELY_RTT_NMT_CFG_COMPLETION_LOCAL_ERROR,
+};
+
+/** @brief Terminal result returned by lely_rtt_runtime_nmt_configure(). */
+struct lely_rtt_nmt_cfg_result {
+    rt_uint8_t node_id; /**< Remote node that owned the configuration request. */
+    enum lely_rtt_nmt_cfg_completion_status status; /**< Terminal classification. */
+    rt_err_t local_error; /**< Local dispatch error for LOCAL_ERROR. */
+    rt_uint32_t abort_code; /**< SDO abort code, or zero when absent. */
+};
+#endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
+
+#if defined(PKG_LELY_USING_MASTER_TIME)
+/** @brief Enable reception of CANopen TIME frames on object 0x1012's CAN-ID. */
+#define LELY_RTT_TIME_ROLE_CONSUMER (1u << 0)
+/** @brief Permit explicit application-triggered CANopen TIME transmission. */
+#define LELY_RTT_TIME_ROLE_PRODUCER (1u << 1)
+
+/** @brief Last absolute CANopen TIME value received by the local Master. */
+struct lely_rtt_time_value {
+    rt_int64_t seconds; /**< Unix seconds corresponding to the received TIME value. */
+    rt_int32_t nanoseconds; /**< Fractional nanoseconds; TIME resolution is 1 ms. */
+    rt_uint32_t sequence; /**< Increments for each stable received TIME snapshot. */
+};
+#endif /* defined(PKG_LELY_USING_MASTER_TIME) */
 
 #if defined(PKG_LELY_USING_MASTER_SDO)
 /**
@@ -348,6 +383,173 @@ rt_err_t lely_rtt_runtime_get_remote_boot_status(lely_rtt_runtime_t *runtime,
 rt_err_t lely_rtt_runtime_post_nmt(lely_rtt_runtime_t *runtime,
         enum lely_rtt_nmt_command command, rt_uint8_t node_id);
 #endif /* defined(PKG_LELY_USING_MASTER_COMMAND) */
+
+#if defined(PKG_LELY_USING_MASTER_NMT_CFG)
+/**
+ * @brief Run one Lely NMT configuration request for a remote node.
+ *
+ * The call crosses the single-owner boundary and waits until the Lely
+ * configuration service completes, is canceled by runtime teardown/NMT reset,
+ * or fails locally. The protocol timeout is passed to co_nmt_cfg_req(). There
+ * is no second caller-side wait timeout: the stack-backed request must remain
+ * alive until the owner or Lely callback publishes a terminal result. The
+ * caller must therefore be a normal non-owner RT-Thread thread.
+ *
+ * @param runtime Started runtime with a configured local NMT Master.
+ * @param node_id Remote Node-ID in the range 1..127.
+ * A useful request must have embedded concise DCF data at 0x1F22 or an
+ * owner-installed Lely cfg_ind callback. Requests that would enter Lely's
+ * 0x1F8A restore/reset path are rejected with LOCAL_ERROR/-RT_ENOSYS because
+ * the current Master cannot safely arbitrate that Boot-up handshake with
+ * automatic NMT boot. Missing supported work uses the same fail-closed result
+ * instead of reporting an upstream no-op configuration as successful.
+ *
+ * @param timeout_ms Configuration/SDO timeout in milliseconds; 1..INT_MAX.
+ * @param result Output terminal result when the function returns RT_EOK.
+ * @return RT_EOK after a terminal result, or an RT-Thread admission/IPC error.
+ */
+rt_err_t lely_rtt_runtime_nmt_configure(lely_rtt_runtime_t *runtime,
+        rt_uint8_t node_id, rt_uint32_t timeout_ms,
+        struct lely_rtt_nmt_cfg_result *result);
+#endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
+
+#if defined(PKG_LELY_USING_LOCAL_OD)
+/** @brief Origin of the most recent successful manufacturer OD write. */
+enum lely_rtt_local_od_change_source {
+    /** Write entered through lely_rtt_runtime_local_od_write(). */
+    LELY_RTT_LOCAL_OD_CHANGE_LOCAL_API = 0,
+    /** Write entered through Lely protocol processing (for example SSDO/RPDO). */
+    LELY_RTT_LOCAL_OD_CHANGE_PROTOCOL,
+};
+
+/**
+ * @brief Stable metadata snapshot for the latest successful local OD write.
+ *
+ * The snapshot contains metadata only. Call lely_rtt_runtime_local_od_read()
+ * when the current value is needed. Protocol-originated writes include any
+ * Lely download path that reaches the watched manufacturer-specific object,
+ * such as Server-SDO and RPDO processing.
+ */
+struct lely_rtt_local_od_change {
+    rt_uint16_t index; /**< Changed manufacturer-specific object index. */
+    rt_uint8_t subindex; /**< Changed sub-index. */
+    enum lely_rtt_local_od_change_source source; /**< Write origin class. */
+    rt_uint32_t size; /**< Transfer size in bytes, saturated at UINT32_MAX. */
+    rt_uint32_t sequence; /**< Increments for each stable published change. */
+};
+
+/**
+ * @brief Copy one manufacturer-specific local OD value through the owner.
+ *
+ * Only indices 0x2000..0x5FFF are exposed. The returned allocation belongs to
+ * the caller and must be released with lely_rtt_local_od_free(). Remote
+ * Server-SDO access and this API observe the same local co_dev object. The
+ * returned bytes use CANopen SDO transfer encoding. The call is synchronous
+ * across the owner queue so the stack-backed request remains valid until the
+ * owner has finished the SDO-style upload indication.
+ *
+ * @param runtime Started runtime with a configured local Master object dictionary.
+ * @param index Manufacturer-specific object index (0x2000..0x5FFF).
+ * @param subindex Object sub-index.
+ * @param data Output caller-owned copy; may be RT_NULL when size is zero.
+ * @param size Output copied byte count.
+ * @return RT_EOK on success, or an RT-Thread/local OD error.
+ */
+rt_err_t lely_rtt_runtime_local_od_read(lely_rtt_runtime_t *runtime,
+        rt_uint16_t index, rt_uint8_t subindex, void **data, rt_size_t *size);
+
+/**
+ * @brief Write one manufacturer-specific local OD value through the owner.
+ *
+ * The owner invokes the same Lely sub-object download indication path used by
+ * Server-SDO, including OD access/type checks and application download hooks.
+ * The input bytes therefore use CANopen SDO transfer encoding. The synchronous
+ * call keeps the caller-owned input valid until that indication has completed.
+ *
+ * @param runtime Started runtime with a configured local Master object dictionary.
+ * @param index Manufacturer-specific object index (0x2000..0x5FFF).
+ * @param subindex Object sub-index.
+ * @param data Bytes copied into the local OD while the caller remains blocked.
+ * @param size Number of bytes at data; must be non-zero.
+ * @return RT_EOK on success, or an RT-Thread/local OD error.
+ */
+rt_err_t lely_rtt_runtime_local_od_write(lely_rtt_runtime_t *runtime,
+        rt_uint16_t index, rt_uint8_t subindex, const void *data, rt_size_t size);
+
+/**
+ * @brief Release a buffer returned by lely_rtt_runtime_local_od_read().
+ * @param data Buffer returned by the local OD read API; RT_NULL is accepted.
+ */
+void lely_rtt_local_od_free(void *data);
+
+/**
+ * @brief Read the latest successful manufacturer OD write metadata.
+ *
+ * The owner publishes the snapshot after the existing Lely download
+ * indication accepts a non-empty final transfer segment. Zero-length/preflight
+ * indications are not reported as value changes. The wrapper preserves and
+ * chains the original indication, so Server-SDO/RPDO behavior is not replaced.
+ * If a read races owner publication, it may sleep briefly before retrying so a
+ * lower-priority owner can complete the seqlock update. Call this API only from
+ * normal schedulable thread context, not from ISR or scheduler-locked context.
+ *
+ * @param runtime Runtime handle.
+ * @param change Output stable write metadata snapshot.
+ * @return RT_EOK when a write has been observed, -RT_EBUSY before the first
+ *         write or after runtime reset/teardown, or -RT_EINVAL for bad input.
+ */
+rt_err_t lely_rtt_runtime_get_local_od_change(lely_rtt_runtime_t *runtime,
+        struct lely_rtt_local_od_change *change);
+#endif /* defined(PKG_LELY_USING_LOCAL_OD) */
+
+#if defined(PKG_LELY_USING_MASTER_TIME)
+/**
+ * @brief Configure CANopen TIME consumer/explicit-producer role bits.
+ *
+ * The CAN-ID and frame-format bits already stored in object 0x1012 are
+ * preserved. Enabling the producer permits lely_rtt_runtime_time_send(); it
+ * does not start Lely's periodic producer because the RT port clock is
+ * monotonic uptime rather than an absolute wall clock.
+ *
+ * @param runtime Started runtime with a configured local Master.
+ * @param roles Bitwise OR of LELY_RTT_TIME_ROLE_CONSUMER/PRODUCER, or zero.
+ * @return RT_EOK on success, -RT_EBUSY while the local NMT state has no active
+ *         TIME service (for example STOP/reset), or another local error.
+ */
+rt_err_t lely_rtt_runtime_time_configure(lely_rtt_runtime_t *runtime,
+        rt_uint8_t roles);
+
+/**
+ * @brief Send one explicit absolute CANopen TIME value immediately.
+ *
+ * Producer role must already be enabled. The timestamp is encoded directly
+ * from Unix time and therefore never treats the runtime's monotonic RT tick
+ * clock as UTC or changes the monotonic CAN-network timer base. CANopen TIME
+ * has millisecond resolution; sub-millisecond input is truncated on the wire.
+ *
+ * @param runtime Started runtime with a configured local Master.
+ * @param seconds Absolute Unix seconds representable by CANopen TIME.
+ * @param nanoseconds Fractional nanoseconds in the range 0..999999999.
+ * @return RT_EOK on successful CAN submission, or an RT-Thread/local error.
+ */
+rt_err_t lely_rtt_runtime_time_send(lely_rtt_runtime_t *runtime,
+        rt_int64_t seconds, rt_int32_t nanoseconds);
+
+/**
+ * @brief Read the latest owner-published CANopen TIME consumer snapshot.
+ *
+ * If a read races owner publication, it may sleep briefly before retrying so a
+ * lower-priority owner can complete the seqlock update. Call this API only from
+ * normal schedulable thread context, not from ISR or scheduler-locked context.
+ *
+ * @param runtime Runtime handle.
+ * @param value Output stable absolute timestamp snapshot.
+ * @return RT_EOK when available, -RT_EBUSY before the first TIME reception or
+ *         after runtime reset/teardown, or -RT_EINVAL for invalid arguments.
+ */
+rt_err_t lely_rtt_runtime_get_time(lely_rtt_runtime_t *runtime,
+        struct lely_rtt_time_value *value);
+#endif /* defined(PKG_LELY_USING_MASTER_TIME) */
 
 #if defined(PKG_LELY_USING_MASTER_SDO)
 /**
