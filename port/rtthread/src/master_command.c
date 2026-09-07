@@ -8,6 +8,7 @@
  * 2026-09-06     wdfk-prog         support rt_mq_recv return semantics
  * 2026-09-06     wdfk-prog         dispatch TPDO and EMCY owner-safe requests
  * 2026-09-06     wdfk-prog         add owner-dispatched application SDO cancellation
+ * 2026-09-06     wdfk-prog         dispatch B9 SYNC/PDO control requests
  */
 
 /**
@@ -370,6 +371,12 @@ lely_rtt_master_command_dispatch(struct lely_rtt_runtime *runtime)
             lely_rtt_master_pdo_dispatch(runtime, command.data.pdo.request);
             break;
 #endif /* defined(PKG_LELY_USING_MASTER_PDO_TX) */
+#if defined(PKG_LELY_USING_MASTER_SYNC_PDO)
+        case LELY_RTT_MASTER_COMMAND_SYNC:
+            lely_rtt_master_sync_dispatch(runtime,
+                    command.data.sync_control.request);
+            break;
+#endif /* defined(PKG_LELY_USING_MASTER_SYNC_PDO) */
 #if defined(PKG_LELY_USING_MASTER_EMCY)
         case LELY_RTT_MASTER_COMMAND_EMCY:
             lely_rtt_master_emcy_dispatch(runtime, command.data.emcy.request);
@@ -431,6 +438,12 @@ lely_rtt_master_command_fini(struct lely_rtt_runtime *runtime)
                 lely_rtt_master_pdo_cancel_queued(command.data.pdo.request);
                 break;
 #endif /* defined(PKG_LELY_USING_MASTER_PDO_TX) */
+#if defined(PKG_LELY_USING_MASTER_SYNC_PDO)
+            case LELY_RTT_MASTER_COMMAND_SYNC:
+                lely_rtt_master_sync_cancel_queued(
+                        command.data.sync_control.request);
+                break;
+#endif /* defined(PKG_LELY_USING_MASTER_SYNC_PDO) */
 #if defined(PKG_LELY_USING_MASTER_EMCY)
             case LELY_RTT_MASTER_COMMAND_EMCY:
                 lely_rtt_master_emcy_cancel_queued(command.data.emcy.request);

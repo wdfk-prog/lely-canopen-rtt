@@ -229,7 +229,7 @@ co sdo read  <node> <index> <subindex> <bool|u8|u16|u32|i8|i16|i32> <timeout-ms>
 co sdo write <node> <index> <subindex> <bool|u8|u16|u32|i8|i16|i32> <value> <timeout-ms>
 ```
 
-M2 不把 `co_csdo_t *` 暴露给 MSH/application。受控 `stop/reset-node/reset-comm` 会先取消该节点的 application SDO；成功发送 reset 后继续挂起新的 application SDO，直到远端 boot process 完成或状态证据恢复到可进行 SDO 的状态。对于远端自发 Boot-up，owner 会先终止并销毁 application default CSDO，再调用 `co_nmt_on_st()` 让 Lely NMT boot 独占默认 SDO 通道；snapshot 仍在默认 NMT 处理之后发布，且不修改 frozen upstream。M3 的 PDO/SYNC/EMCY 控制 API 本轮没有提前定义。
+M2 不把 `co_csdo_t *` 暴露给 MSH/application。受控 `stop/reset-node/reset-comm` 会先取消该节点的 application SDO；成功发送 reset 后继续挂起新的 application SDO，直到远端 boot process 完成或状态证据恢复到可进行 SDO 的状态。对于远端自发 Boot-up，owner 会先终止并销毁 application default CSDO，再调用 `co_nmt_on_st()` 让 Lely NMT boot 独占默认 SDO 通道；snapshot 仍在默认 NMT 处理之后发布，且不修改 frozen upstream。B9 进一步增加 owner-safe SYNC producer/consumer application bridge、post-PDO SYNC snapshot/callback，以及本地 RPDO/TPDO transmission type `0..240/254/255` 控制；共享 Master+Node1 示例继续保持原有 event-driven 默认值，启用 B9 后可通过 MSH/API 显式切换为同步 PDO。
 
 注意：B4 主站角色与 M0/M1/M2 控制面已经接到源码/配置层，但当前 ZIP 不包含实际 BSP/工具链工程，本阶段没有执行目标 SCons build、目标板运行或 CANopen HIL。
 

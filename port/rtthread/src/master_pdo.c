@@ -4,15 +4,17 @@
  * Change Logs:
  * Date           Author            Notes
  * 2026-09-06     wdfk-prog         first version
+ * 2026-09-06     wdfk-prog         add B9 synchronous PDO control and safe mode transitions
  */
 
 /**
  * @file master_pdo.c
- * @brief Owner-safe event-driven TPDO trigger bridge for RT-Thread applications.
+ * @brief Owner-safe TPDO event and PDO transmission control for RT-Thread.
  *
  * Local mapped values are written through the existing owner-safe OD API. This
- * module only triggers an already configured static TPDO; it deliberately does
- * not remap PDOs or change their communication parameters at runtime.
+ * module never changes mapping/COB-ID. B9 applies transmission-type changes
+ * through Lely's OD indication and reinitializes an active PDO service at
+ * synchronous mode boundaries so old transient state cannot cross the edge.
  *
  * @author wdfk-prog
  */
@@ -21,13 +23,188 @@
 
 #if defined(PKG_LELY_USING_MASTER_PDO_TX)
 
+#include <lely/co/dev.h>
+#include <lely/co/obj.h>
 #include <lely/co/pdo.h>
+#include <lely/co/rpdo.h>
 #include <lely/co/tpdo.h>
 
 struct lely_rtt_master_pdo_request {
     struct lely_rtt_master_sync sync;
+    rt_uint8_t operation;
+    rt_uint8_t direction;
+    rt_uint8_t transmission_type;
     rt_uint16_t pdo_number;
 };
+
+enum lely_rtt_master_pdo_operation {
+    LELY_RTT_MASTER_PDO_EVENT = 0,
+#if defined(PKG_LELY_USING_MASTER_SYNC_PDO)
+    LELY_RTT_MASTER_PDO_GET_TRANSMISSION,
+    LELY_RTT_MASTER_PDO_SET_TRANSMISSION,
+#endif /* defined(PKG_LELY_USING_MASTER_SYNC_PDO) */
+};
+
+#if defined(PKG_LELY_USING_MASTER_SYNC_PDO)
+/** @brief Return whether B9 exposes this non-RTR CiA 301 transmission type. */
+static rt_bool_t
+lely_rtt_master_pdo_transmission_supported(rt_uint8_t transmission_type)
+{
+    return transmission_type <= 0xf0u || transmission_type == 0xfeu
+            || transmission_type == 0xffu;
+}
+
+/** @brief Detect an existing PDO service left stopped by a failed transition. */
+static rt_bool_t
+lely_rtt_master_pdo_service_stopped(struct lely_rtt_runtime *runtime,
+        const struct lely_rtt_master_pdo_request *request)
+{
+    if (request->direction == LELY_RTT_PDO_DIRECTION_RPDO) {
+        co_rpdo_t *rpdo = co_nmt_get_rpdo(runtime->master_nmt,
+                request->pdo_number);
+
+        return rpdo && co_rpdo_is_stopped(rpdo);
+    }
+
+    {
+        co_tpdo_t *tpdo = co_nmt_get_tpdo(runtime->master_nmt,
+                request->pdo_number);
+
+        return tpdo && co_tpdo_is_stopped(tpdo);
+    }
+}
+
+/** @brief Restart an active local PDO and roll back the OD on failure. */
+static rt_err_t
+lely_rtt_master_pdo_restart_active(struct lely_rtt_runtime *runtime,
+        const struct lely_rtt_master_pdo_request *request, co_sub_t *sub,
+        rt_uint8_t transmission_type_old)
+{
+    co_rpdo_t *rpdo = RT_NULL;
+    co_tpdo_t *tpdo = RT_NULL;
+
+    if (request->direction == LELY_RTT_PDO_DIRECTION_RPDO) {
+        rpdo = co_nmt_get_rpdo(runtime->master_nmt, request->pdo_number);
+        if (!rpdo || co_rpdo_is_stopped(rpdo))
+            return RT_EOK;
+
+        co_rpdo_stop(rpdo);
+        if (co_rpdo_start(rpdo) == 0)
+            return RT_EOK;
+        if (!co_rpdo_is_stopped(rpdo))
+            co_rpdo_stop(rpdo);
+    } else {
+        tpdo = co_nmt_get_tpdo(runtime->master_nmt, request->pdo_number);
+        if (!tpdo || co_tpdo_is_stopped(tpdo))
+            return RT_EOK;
+
+        co_tpdo_stop(tpdo);
+        if (co_tpdo_start(tpdo) == 0)
+            return RT_EOK;
+        if (!co_tpdo_is_stopped(tpdo))
+            co_tpdo_stop(tpdo);
+    }
+
+    /*
+     * The requested type is already committed when the new-mode start fails.
+     * Restore the old OD value while the service is stopped, then start the old
+     * mode again. Otherwise a retry could see the new OD value, take the
+     * same-value no-op path and report success while the PDO remains stopped.
+     */
+    if (!co_sub_set_val_u8(sub, transmission_type_old)) {
+        LELY_RTT_LOG_E("PDO transmission rollback OD restore failed: dir=%s pdo=%u",
+                request->direction == LELY_RTT_PDO_DIRECTION_RPDO ? "rx" : "tx",
+                (unsigned int)request->pdo_number);
+        return -RT_ERROR;
+    }
+
+    if (rpdo) {
+        if (co_rpdo_start(rpdo) == -1) {
+            LELY_RTT_LOG_E("PDO transmission rollback restart failed: dir=rx pdo=%u",
+                    (unsigned int)request->pdo_number);
+            return -RT_ERROR;
+        }
+    } else if (co_tpdo_start(tpdo) == -1) {
+        LELY_RTT_LOG_E("PDO transmission rollback restart failed: dir=tx pdo=%u",
+                (unsigned int)request->pdo_number);
+        return -RT_ERROR;
+    }
+
+    return -RT_ERROR;
+}
+
+/** @brief Read/write one local PDO communication parameter sub-index 2. */
+static rt_err_t
+lely_rtt_master_pdo_transmission_owner(struct lely_rtt_runtime *runtime,
+        struct lely_rtt_master_pdo_request *request, rt_bool_t write)
+{
+    co_unsigned16_t index;
+    co_unsigned8_t transmission_type_old;
+    co_sub_t *sub;
+    co_unsigned32_t ac;
+    rt_err_t err;
+
+    if (!runtime || !runtime->master_nmt || !runtime->master_dev || !request)
+        return -RT_EBUSY;
+    if (request->direction != LELY_RTT_PDO_DIRECTION_RPDO
+            && request->direction != LELY_RTT_PDO_DIRECTION_TPDO)
+        return -RT_EINVAL;
+
+    index = (request->direction == LELY_RTT_PDO_DIRECTION_RPDO ? 0x1400u
+            : 0x1800u) + request->pdo_number - 1u;
+    sub = co_dev_find_sub(runtime->master_dev, index, 0x02);
+    if (!sub || co_sub_get_type(sub) != CO_DEFTYPE_UNSIGNED8)
+        return -RT_ERROR;
+
+    transmission_type_old = co_sub_get_val_u8(sub);
+    if (!write) {
+        request->transmission_type = transmission_type_old;
+        return RT_EOK;
+    }
+    if (!lely_rtt_master_pdo_transmission_supported(
+            request->transmission_type))
+        return -RT_EINVAL;
+    if (request->transmission_type <= 0xf0u
+            && !co_dev_find_sub(runtime->master_dev, 0x1005, 0x00))
+        return -RT_ENOSYS;
+    if (lely_rtt_master_pdo_service_stopped(runtime, request))
+        return -RT_EBUSY;
+    if (request->transmission_type == transmission_type_old)
+        return RT_EOK;
+
+    /*
+     * Lely updates the cached transmission type through the OD indication, but
+     * that path deliberately leaves mode-local transient state intact. Restart
+     * an active service after the accepted write so an old TPDO event timer or
+     * pending synchronous RPDO frame cannot cross the transmission-mode edge.
+     * Inactive PDOs have no service object and consume the new OD value when
+     * NMT next creates them.
+     */
+    ac = co_sub_dn_ind_val(sub, CO_DEFTYPE_UNSIGNED8,
+            &request->transmission_type);
+    if (ac) {
+        LELY_RTT_LOG_W("PDO transmission update rejected: dir=%s pdo=%u abort=0x%08x",
+                request->direction == LELY_RTT_PDO_DIRECTION_RPDO ? "rx" : "tx",
+                (unsigned int)request->pdo_number, (unsigned int)ac);
+        return -RT_ERROR;
+    }
+
+    if (transmission_type_old <= 0xf0u
+            || request->transmission_type <= 0xf0u) {
+        err = lely_rtt_master_pdo_restart_active(runtime, request, sub,
+                transmission_type_old);
+        if (err != RT_EOK) {
+            LELY_RTT_LOG_E(
+                    "PDO transmission service restart failed: dir=%s pdo=%u",
+                    request->direction == LELY_RTT_PDO_DIRECTION_RPDO
+                            ? "rx" : "tx",
+                    (unsigned int)request->pdo_number);
+            return err;
+        }
+    }
+    return RT_EOK;
+}
+#endif /* defined(PKG_LELY_USING_MASTER_SYNC_PDO) */
 
 void
 lely_rtt_master_pdo_dispatch(struct lely_rtt_runtime *runtime,
@@ -45,9 +222,23 @@ lely_rtt_master_pdo_dispatch(struct lely_rtt_runtime *runtime,
         return;
     }
 
+#if defined(PKG_LELY_USING_MASTER_SYNC_PDO)
+    if (request->operation == LELY_RTT_MASTER_PDO_GET_TRANSMISSION
+            || request->operation == LELY_RTT_MASTER_PDO_SET_TRANSMISSION) {
+        err = lely_rtt_master_pdo_transmission_owner(runtime, request,
+                request->operation == LELY_RTT_MASTER_PDO_SET_TRANSMISSION);
+        lely_rtt_master_sync_complete(&request->sync, err);
+        return;
+    }
+#endif /* defined(PKG_LELY_USING_MASTER_SYNC_PDO) */
+    if (request->operation != LELY_RTT_MASTER_PDO_EVENT) {
+        lely_rtt_master_sync_complete(&request->sync, -RT_EINVAL);
+        return;
+    }
+
     /* PDO services exist only while the local NMT state is Operational. */
     tpdo = co_nmt_get_tpdo(runtime->master_nmt, request->pdo_number);
-    if (!tpdo) {
+    if (!tpdo || co_tpdo_is_stopped(tpdo)) {
         lely_rtt_master_sync_complete(&request->sync, -RT_EBUSY);
         return;
     }
@@ -57,14 +248,24 @@ lely_rtt_master_pdo_dispatch(struct lely_rtt_runtime *runtime,
     if (!comm || !map) {
         err = -RT_ERROR;
     } else if ((comm->cobid & CO_PDO_COBID_VALID)
+#if defined(PKG_LELY_USING_MASTER_SYNC_PDO)
+            || (comm->trans != 0x00u && comm->trans != 0xfeu
+                    && comm->trans != 0xffu)
+#else
             || (comm->trans != 0xfeu && comm->trans != 0xffu)
+#endif /* defined(PKG_LELY_USING_MASTER_SYNC_PDO) */
             || !map->n || map->n > CO_PDO_NUM_MAPS) {
         /*
          * co_tpdo_event() reports success for several no-op configurations.
-         * Fail closed here so callers never interpret an invalid, synchronous,
-         * MPDO or empty static mapping as a transmitted application PDO.
+         * Fail closed here so callers never interpret an invalid, unsupported
+         * synchronous, MPDO or empty mapping as an accepted application event.
          */
         err = -RT_EINVAL;
+#if defined(PKG_LELY_USING_MASTER_SYNC_PDO)
+    } else if (comm->trans == 0x00u
+            && !co_nmt_get_sync(runtime->master_nmt)) {
+        err = -RT_EBUSY;
+#endif /* defined(PKG_LELY_USING_MASTER_SYNC_PDO) */
     } else if (co_tpdo_event(tpdo) == -1) {
         err = -RT_ERROR;
     }
@@ -91,6 +292,7 @@ lely_rtt_runtime_tpdo_event(lely_rtt_runtime_t *runtime, rt_uint16_t pdo_number)
         return -RT_EINVAL;
 
     rt_memset(&request, 0, sizeof(request));
+    request.operation = LELY_RTT_MASTER_PDO_EVENT;
     request.pdo_number = pdo_number;
     err = lely_rtt_master_sync_init(&request.sync, "lelytpdo");
     if (err != RT_EOK)
@@ -105,5 +307,77 @@ lely_rtt_runtime_tpdo_event(lely_rtt_runtime_t *runtime, rt_uint16_t pdo_number)
     lely_rtt_master_sync_fini(&request.sync);
     return err;
 }
+
+#if defined(PKG_LELY_USING_MASTER_SYNC_PDO)
+/** @brief Submit one synchronous B9 PDO communication-parameter request. */
+static rt_err_t
+lely_rtt_master_pdo_submit(lely_rtt_runtime_t *runtime,
+        struct lely_rtt_master_pdo_request *request)
+{
+    struct lely_rtt_master_command command;
+    rt_err_t err;
+
+    if (!runtime || !request || runtime->owner_thread == rt_thread_self())
+        return -RT_EINVAL;
+
+    err = lely_rtt_master_sync_init(&request->sync, "lelypdo");
+    if (err != RT_EOK)
+        return err;
+
+    rt_memset(&command, 0, sizeof(command));
+    command.type = LELY_RTT_MASTER_COMMAND_PDO_TX;
+    command.data.pdo.request = request;
+    err = lely_rtt_master_command_post(runtime, &command);
+    if (err == RT_EOK)
+        err = lely_rtt_master_sync_wait(&request->sync);
+    lely_rtt_master_sync_fini(&request->sync);
+    return err;
+}
+
+rt_err_t
+lely_rtt_runtime_pdo_set_transmission(lely_rtt_runtime_t *runtime,
+        enum lely_rtt_pdo_direction direction, rt_uint16_t pdo_number,
+        rt_uint8_t transmission_type)
+{
+    struct lely_rtt_master_pdo_request request;
+
+    if (!runtime || !pdo_number || pdo_number > CO_NUM_PDOS
+            || (direction != LELY_RTT_PDO_DIRECTION_RPDO
+                    && direction != LELY_RTT_PDO_DIRECTION_TPDO)
+            || !lely_rtt_master_pdo_transmission_supported(transmission_type))
+        return -RT_EINVAL;
+
+    rt_memset(&request, 0, sizeof(request));
+    request.operation = LELY_RTT_MASTER_PDO_SET_TRANSMISSION;
+    request.direction = (rt_uint8_t)direction;
+    request.pdo_number = pdo_number;
+    request.transmission_type = transmission_type;
+    return lely_rtt_master_pdo_submit(runtime, &request);
+}
+
+rt_err_t
+lely_rtt_runtime_pdo_get_transmission(lely_rtt_runtime_t *runtime,
+        enum lely_rtt_pdo_direction direction, rt_uint16_t pdo_number,
+        rt_uint8_t *transmission_type)
+{
+    struct lely_rtt_master_pdo_request request;
+    rt_err_t err;
+
+    if (!runtime || !transmission_type || !pdo_number
+            || pdo_number > CO_NUM_PDOS
+            || (direction != LELY_RTT_PDO_DIRECTION_RPDO
+                    && direction != LELY_RTT_PDO_DIRECTION_TPDO))
+        return -RT_EINVAL;
+
+    rt_memset(&request, 0, sizeof(request));
+    request.operation = LELY_RTT_MASTER_PDO_GET_TRANSMISSION;
+    request.direction = (rt_uint8_t)direction;
+    request.pdo_number = pdo_number;
+    err = lely_rtt_master_pdo_submit(runtime, &request);
+    if (err == RT_EOK)
+        *transmission_type = request.transmission_type;
+    return err;
+}
+#endif /* defined(PKG_LELY_USING_MASTER_SYNC_PDO) */
 
 #endif /* defined(PKG_LELY_USING_MASTER_PDO_TX) */

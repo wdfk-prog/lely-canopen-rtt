@@ -278,17 +278,36 @@ config PKG_LELY_USING_LOCAL_OD
         that application threads can observe without touching co_dev directly.
 
 config PKG_LELY_USING_MASTER_PDO_TX
-    bool "Enable event-driven Master TPDO trigger bridge"
+    bool "Enable Master TPDO event trigger bridge"
     default n
     depends on PKG_LELY_USING_MASTER_COMMAND
     depends on PKG_LELY_USING_LOCAL_OD
     depends on PKG_LELY_USING_CO_TPDO
     help
         Allow application/MSH threads to trigger an already configured static
-        event-driven Master TPDO through the owner queue. Applications update
-        mapped 0x2000..0x5FFF values with the local OD bridge first, then issue
-        the TPDO event. Dynamic PDO remapping and synchronous TPDO control are
-        intentionally outside this B5.2 bridge.
+        Master TPDO through the owner queue. Applications update mapped
+        0x2000..0x5FFF values with the local OD bridge first, then issue the
+        TPDO event. B5.2 accepts event-driven types 0xFE/0xFF. When the B9
+        SYNC/PDO bridge is enabled it also accepts synchronous acyclic type 0,
+        which arms the TPDO for the next SYNC. Dynamic PDO remapping remains
+        outside this bridge.
+
+config PKG_LELY_USING_MASTER_SYNC_PDO
+    bool "Enable CANopen SYNC and synchronous PDO application bridge"
+    default n
+    depends on PKG_LELY_USING_MASTER_COMMAND
+    depends on PKG_LELY_USING_LOCAL_OD
+    depends on PKG_LELY_USING_CO_SYNC
+    depends on PKG_LELY_USING_CO_RPDO
+    depends on PKG_LELY_USING_CO_TPDO
+    select PKG_LELY_USING_MASTER_PDO_TX
+    help
+        Publish owner-ordered SYNC indications after Lely has processed all
+        synchronous TPDOs and RPDOs, optionally notify one startup-registered
+        application callback, and expose owner-safe control of object 0x1006
+        plus local RPDO/TPDO transmission type. The PDO control accepts CiA 301
+        synchronous types 0..240 and existing event-driven types 254/255; RTR-
+        only modes and dynamic PDO remapping remain outside B9.
 
 config PKG_LELY_USING_MASTER_EMCY
     bool "Enable CANopen EMCY application bridge"
@@ -336,9 +355,9 @@ config PKG_LELY_USING_MSH
     help
         Export one MSH root command named 'co' for the default auto-init Master.
         status/node/boot read existing snapshots and nmt posts owner commands.
-        Enabled Master SDO, NMT configuration, local OD, TPDO, EMCY and TIME
-        bridges add their corresponding diagnostic/control subcommands under
-        the same root.
+        Enabled Master SDO, NMT configuration, local OD, TPDO, SYNC/PDO, EMCY
+        and TIME bridges add their corresponding diagnostic/control subcommands
+        under the same root.
 
 endmenu
 

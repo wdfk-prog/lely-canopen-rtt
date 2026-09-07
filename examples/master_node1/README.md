@@ -44,12 +44,67 @@ checked-in OD contains Master RPDO1 (`0x1400/0x1600`) mapped to local
 mapped from local `0x2200:01` to Node1 RPDO1 (`0x201`). Remote mapping metadata
 is retained at `0x5800/0x5A00` and `0x5C00/0x5E00`. B5.2 applications update
 `0x2200:01` through the owner-safe local OD API and then call
-`lely_rtt_runtime_tpdo_event(runtime, 1)` (or `co tpdo event 1`).
+`lely_rtt_runtime_tpdo_event(runtime, 1)` (or `co tpdo event 1`). B9 can switch
+these same local PDOs to synchronous transmission at runtime without changing
+the shared DCF/SDEV defaults.
 
 Node1 also exposes EMCY at `0x081`; the Master `0x1028:01` consumer entry is
 configured for that COB-ID. With the B6 bridge enabled, `co emcy` or
 `co emcy 1` reads the bounded remote EMCY history without exposing Lely objects
 to non-owner threads.
+
+## SYNC and synchronous PDO example
+
+Enable `PKG_LELY_USING_MASTER_SYNC_PDO` together with the existing Master+Node1
+example. The shared checked-in DCF/SDEV deliberately keeps its pre-B9 defaults:
+object `0x1006` is zero and RPDO1/TPDO1 remain event-driven type 255. This
+preserves the existing B5.2 example when B9 is disabled. The Master OD already
+contains SYNC producer object `0x1005`, so B9 can opt into a real synchronous
+cycle at runtime without replacing or remapping the generated OD.
+
+Use the owner-safe controls to enter synchronous mode explicitly:
+
+```text
+co sync period 1000000
+co pdo trans rx 1 1
+co pdo trans tx 1 1
+co sync status
+```
+
+After these commands the local Master produces SYNC every 1,000,000 us, TPDO1
+uses cyclic synchronous transmission type 1, and RPDO1 applies received Node1
+TPDO data at the synchronous boundary. Node1 remains event-driven in this shared
+fixture so the pre-B9 B5.2 smoke path is unchanged; a product that requires the
+remote node itself to participate synchronously should configure that node's
+SYNC consumer and PDO communication parameters through its normal device
+configuration flow.
+
+Lely handles each local SYNC in owner-thread order: synchronous TPDOs are
+sampled/transmitted first, synchronous RPDO data is then committed to the local
+OD, and only afterwards does B9 publish its application SYNC
+indication/snapshot. `co sync status` therefore observes a post-PDO boundary
+rather than a pre-PDO notification.
+
+The same controls are available to product code through
+`lely_rtt_runtime_sync_set_period()`,
+`lely_rtt_runtime_pdo_get_transmission()` and
+`lely_rtt_runtime_pdo_set_transmission()`. These calls update the active Lely
+service through the owner queue; they do not perform dynamic PDO remapping.
+
+Transmission type 0 is supported for TPDO event-on-next-SYNC behavior. After
+setting TPDO1 to type 0, update its mapped OD value and call
+`lely_rtt_runtime_tpdo_event(runtime, 1)`; the event is armed immediately but
+the PDO is sampled and sent only when the next SYNC is processed. Types 1..240
+are cyclic synchronous and are driven only by SYNC. Types 254/255 preserve the
+existing event-driven behavior. RTR-only/reserved types remain outside B9.
+
+The optional callback registered by `lely_rtt_runtime_configure_sync_ind()` runs
+in the Lely owner thread after the synchronous PDO work. The registration
+persists across stop/start cycles until reconfigured or the runtime is destroyed.
+Keep the callback and its data alive for that lifetime, keep the callback bounded
+and non-blocking, and do not call a runtime API that waits for owner completion.
+For application threads that only need observation, prefer
+`lely_rtt_runtime_get_sync()` and the local-OD snapshot/read APIs.
 
 ## Manual NMT configuration example
 
