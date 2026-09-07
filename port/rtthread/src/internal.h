@@ -12,6 +12,7 @@
  * 2026-09-06     wdfk-prog         add local NMT CFG lifetime barrier hook
  * 2026-09-06     wdfk-prog         add B5.2 TPDO and B6 EMCY owner bridges
  * 2026-09-06     wdfk-prog         add managed manual CFG source state
+ * 2026-09-06     wdfk-prog         add B9 SYNC and synchronous PDO owner state
  */
 
 /**
@@ -147,6 +148,9 @@ struct lely_rtt_local_od_hook;
 #if defined(PKG_LELY_USING_MASTER_PDO_TX)
 struct lely_rtt_master_pdo_request;
 #endif /* defined(PKG_LELY_USING_MASTER_PDO_TX) */
+#if defined(PKG_LELY_USING_MASTER_SYNC_PDO)
+struct lely_rtt_master_sync_control_request;
+#endif /* defined(PKG_LELY_USING_MASTER_SYNC_PDO) */
 #if defined(PKG_LELY_USING_MASTER_EMCY)
 struct lely_rtt_master_emcy_request;
 #endif /* defined(PKG_LELY_USING_MASTER_EMCY) */
@@ -170,6 +174,9 @@ enum lely_rtt_master_command_type {
 #if defined(PKG_LELY_USING_MASTER_PDO_TX)
     LELY_RTT_MASTER_COMMAND_PDO_TX,
 #endif /* defined(PKG_LELY_USING_MASTER_PDO_TX) */
+#if defined(PKG_LELY_USING_MASTER_SYNC_PDO)
+    LELY_RTT_MASTER_COMMAND_SYNC,
+#endif /* defined(PKG_LELY_USING_MASTER_SYNC_PDO) */
 #if defined(PKG_LELY_USING_MASTER_EMCY)
     LELY_RTT_MASTER_COMMAND_EMCY,
 #endif /* defined(PKG_LELY_USING_MASTER_EMCY) */
@@ -210,6 +217,11 @@ struct lely_rtt_master_command {
             struct lely_rtt_master_pdo_request *request;
         } pdo;
 #endif /* defined(PKG_LELY_USING_MASTER_PDO_TX) */
+#if defined(PKG_LELY_USING_MASTER_SYNC_PDO)
+        struct {
+            struct lely_rtt_master_sync_control_request *request;
+        } sync_control;
+#endif /* defined(PKG_LELY_USING_MASTER_SYNC_PDO) */
 #if defined(PKG_LELY_USING_MASTER_EMCY)
         struct {
             struct lely_rtt_master_emcy_request *request;
@@ -308,6 +320,21 @@ struct lely_rtt_runtime {
     rt_atomic_t local_od_change_source;
     rt_atomic_t local_od_change_size;
 #endif /* defined(PKG_LELY_USING_LOCAL_OD) */
+
+#if defined(PKG_LELY_USING_MASTER_SYNC_PDO)
+    /** Startup-only application indication invoked after synchronous PDO work. */
+    lely_rtt_sync_ind_t *sync_app_ind;
+    /** Caller-owned argument paired with sync_app_ind. */
+    void *sync_app_data;
+    /** Even non-zero value identifies a stable processed-SYNC snapshot. */
+    rt_atomic_t sync_snapshot_seq;
+    /** Current object 0x1006 value published with the last SYNC. */
+    rt_atomic_t sync_snapshot_period_us;
+    /** Counter byte from the last processed SYNC. */
+    rt_atomic_t sync_snapshot_counter;
+    /** LELY_RTT_SYNC_ROLE_* value for the last processed SYNC. */
+    rt_atomic_t sync_snapshot_role;
+#endif /* defined(PKG_LELY_USING_MASTER_SYNC_PDO) */
 
 #if defined(PKG_LELY_USING_MASTER_EMCY)
     /** Latest non-zero received EMCY sequence; owner is the only writer. */
@@ -435,13 +462,28 @@ void lely_rtt_local_od_cancel_queued(struct lely_rtt_local_od_request *request);
 #endif /* defined(PKG_LELY_USING_LOCAL_OD) */
 
 #if defined(PKG_LELY_USING_MASTER_PDO_TX)
-/** @brief Dispatch one owner-safe event-driven TPDO trigger. */
+/** @brief Dispatch one owner-safe TPDO event or B9 PDO transmission operation. */
 void lely_rtt_master_pdo_dispatch(struct lely_rtt_runtime *runtime,
         struct lely_rtt_master_pdo_request *request);
-/** @brief Complete a TPDO request that never reached the owner. */
+/** @brief Complete a PDO request that never reached the owner. */
 void lely_rtt_master_pdo_cancel_queued(
         struct lely_rtt_master_pdo_request *request);
 #endif /* defined(PKG_LELY_USING_MASTER_PDO_TX) */
+
+#if defined(PKG_LELY_USING_MASTER_SYNC_PDO)
+/** @brief Reset the application-visible processed-SYNC snapshot. */
+void lely_rtt_master_sync_reset(struct lely_rtt_runtime *runtime);
+/** @brief Install the managed post-PDO SYNC indication before local NMT reset. */
+rt_err_t lely_rtt_master_sync_bind(struct lely_rtt_runtime *runtime);
+/** @brief Detach the managed post-PDO SYNC indication before NMT destruction. */
+void lely_rtt_master_sync_unbind(struct lely_rtt_runtime *runtime);
+/** @brief Dispatch one owner-safe SYNC producer control operation. */
+void lely_rtt_master_sync_dispatch(struct lely_rtt_runtime *runtime,
+        struct lely_rtt_master_sync_control_request *request);
+/** @brief Complete a SYNC control request that never reached the owner. */
+void lely_rtt_master_sync_cancel_queued(
+        struct lely_rtt_master_sync_control_request *request);
+#endif /* defined(PKG_LELY_USING_MASTER_SYNC_PDO) */
 
 #if defined(PKG_LELY_USING_MASTER_EMCY)
 /** @brief Reset the retained remote EMCY history for a new runtime run. */

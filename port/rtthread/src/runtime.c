@@ -13,6 +13,7 @@
  * 2026-09-06     wdfk-prog         sync passive timer clock before owner work
  * 2026-09-06     wdfk-prog         preserve synchronous boot completion snapshot
  * 2026-09-06     wdfk-prog         bind and release B8 manual CFG application data
+ * 2026-09-06     wdfk-prog         bind B9 post-PDO SYNC indication
  */
 
 /**
@@ -125,6 +126,9 @@ lely_rtt_master_snapshots_reset(struct lely_rtt_runtime *runtime)
 #if defined(PKG_LELY_USING_MASTER_TIME)
     lely_rtt_master_time_reset(runtime);
 #endif /* defined(PKG_LELY_USING_MASTER_TIME) */
+#if defined(PKG_LELY_USING_MASTER_SYNC_PDO)
+    lely_rtt_master_sync_reset(runtime);
+#endif /* defined(PKG_LELY_USING_MASTER_SYNC_PDO) */
 }
 
 /**
@@ -344,6 +348,17 @@ lely_rtt_master_init(struct lely_rtt_runtime *runtime)
         }
     }
 #endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
+#if defined(PKG_LELY_USING_MASTER_SYNC_PDO)
+    {
+        /* Bind before reset can activate a periodic producer from object 0x1006. */
+        rt_err_t err = lely_rtt_master_sync_bind(runtime);
+
+        if (err != RT_EOK) {
+            LELY_RTT_LOG_E("SYNC/PDO bridge bind failed: %d", err);
+            return err;
+        }
+    }
+#endif /* defined(PKG_LELY_USING_MASTER_SYNC_PDO) */
 
     if (co_nmt_cs_ind(runtime->master_nmt, CO_NMT_CS_RESET_NODE) == -1) {
         LELY_RTT_LOG_E("CANopen Master local reset-node failed");
@@ -407,6 +422,9 @@ lely_rtt_master_fini(struct lely_rtt_runtime *runtime)
         return;
 
     if (runtime->master_nmt) {
+#if defined(PKG_LELY_USING_MASTER_SYNC_PDO)
+        lely_rtt_master_sync_unbind(runtime);
+#endif /* defined(PKG_LELY_USING_MASTER_SYNC_PDO) */
 #if defined(PKG_LELY_USING_LOCAL_OD)
         lely_rtt_local_od_unbind(runtime);
 #endif /* defined(PKG_LELY_USING_LOCAL_OD) */
