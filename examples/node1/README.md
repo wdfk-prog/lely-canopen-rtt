@@ -11,7 +11,8 @@
    <https://github.com/lely-industries/lely-core/blob/620d1858eb8520dbc3dc5e1a7314565becd54199/test/co-nmt-slave.dcf>。
 2. NMT、heartbeat、SSDO、TPDO、Identity 等对象按 CiA 301 通信语义配置；EDS/DCF 文本格式属于
    CiA 306-1。
-3. 为当前 B4 smoke test 增加 `0x1200`、`0x1800/0x1A00`、`0x2000`、`0x2001`，并固定 Node-ID 为 1。
+3. 为当前 B4/B5/B6 smoke test 增加 `0x1014`、`0x1200`、`0x1400/0x1600`、`0x1800/0x1A00`、
+   `0x2000`、`0x2001`，并固定 Node-ID 为 1。
 
 它不是 upstream `co-nmt-slave.dcf` 的直接复制。upstream 示例使用 Node-ID 2、启用 LSS，并包含
 `0x1F50/0x1F51/0x1F56/0x1F57` program download/control 测试对象；这些不属于当前 Node1 最小闭环，
@@ -20,30 +21,51 @@
 当前 Node1 的关键默认 CAN-ID：
 
 ```text
+EMCY      = 0x081
 Heartbeat = 0x701
 SSDO RX   = 0x601
 SSDO TX   = 0x581
+RPDO1     = 0x201
 TPDO1     = 0x181
 ```
 
-TPDO1 映射 `0x2001:00` 的 32-bit 值，mapping entry 为 `0x20010020`。`0x2000:00` 当前用于 SDO
-读写 smoke；虽然它声明了 `PDOMapping=1`，但当前 DCF 没有 RPDO communication/mapping 对象，不能把它
-当作已经完成的 RPDO 测试通道。
+TPDO1 映射 `0x2001:00` 的 32-bit 值，mapping entry 为 `0x20010020`。RPDO1 映射
+`0x2000:00` 的 32-bit 值，mapping entry 为 `0x20000020`。因此 B5.2 的发送闭环是 Master
+`0x2200:01` 写入并触发 TPDO1 (`0x201`) -> Node1 RPDO1 -> `0x2000:00`。Node1 的 `0x1014`
+默认 EMCY COB-ID 为 `0x081`，用于 B6 Master consumer 验证。
 
 完整的 CANopenEditor 创建 DCF、获取/构建 Lely `dcf2c`、生成 `node1_sdev.c` 以及 `.h` 声明方式见：
 
 [DCF、CANopenEditor 与 Lely dcf2c 使用指南](../../docs/DCF_DCF2C_CANOPENEDITOR.md)
 
-重新生成：
+重新生成时，**必须先切换到仓库根目录**。仓库不再使用 Node1 专用 shell wrapper；统一使用通用 Host 入口 `tools\gen_sdev.ps1`。
 
-```sh
-./tools/gen_node1_sdev.sh
+刷新仓库内 Node1 的 `node1_sdev.c`，同时更新 provenance `.meta`：
+
+```powershell
+.\tools\gen_sdev.ps1 `
+    -Dcf .\examples\node1\node1.dcf `
+    -Name node1_sdev `
+    -OutDir .\examples\node1 `
+    -NoHeader `
+    -MetaFile node1_sdev.meta
 ```
 
-如果 `dcf2c` 不在 `PATH`：
+如果只需要把 DCF 直接转换成 `.c`，不生成 `.h`/`.meta`，可以直接调用项目自带的 Windows `dcf2c.exe`：
 
-```sh
-DCF2C=/absolute/path/to/dcf2c ./tools/gen_node1_sdev.sh
+```powershell
+.\tools\dcf2c.exe `
+    -o .\examples\node1\node1_sdev.c `
+    .\examples\node1\node1.dcf `
+    node1_sdev
 ```
 
-`node1_sdev.c` 是生成文件；`node1_sdev.h` 是项目维护的薄声明头，Lely `dcf2c` 本身不会生成 `.h`。
+其中最后一个参数 `node1_sdev` 是生成到 C 文件中的 `const struct co_sdev` 变量名。
+Linux/macOS 在 `dcf2c` 已安装到 `PATH` 时，对应命令为：
+
+```sh
+dcf2c -o examples/node1/node1_sdev.c examples/node1/node1.dcf node1_sdev
+```
+
+`node1_sdev.c` 是生成文件；`node1_sdev.h` 是项目维护的薄声明头。Lely `dcf2c` 本身只生成 C，
+不会生成 `.h`；`gen_sdev.ps1` 默认可以额外创建薄声明头，但本仓库 Node1 使用 `-NoHeader` 保留现有头文件。

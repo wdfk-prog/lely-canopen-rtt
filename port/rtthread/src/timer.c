@@ -4,6 +4,7 @@
  * Change Logs:
  * Date           Author            Notes
  * 2026-09-03     wdfk-prog         first version
+ * 2026-09-07     wdfk-prog         synchronize CAN network time before owner work
  */
 
 /**
@@ -205,6 +206,30 @@ lely_rtt_timer_advance(struct lely_rtt_runtime *runtime)
     /* io_clock_settime() runs only on the owner, preserving no-thread access. */
     if (lely_rtt_time_now(runtime, &now) == RT_EOK)
         io_clock_settime(io_timer_get_clock(runtime->timer), &now);
+}
+
+/**
+ * @brief Refresh passive and CAN network time before owner command dispatch.
+ * @param runtime Runtime instance; must be called by the owner thread.
+ */
+void
+lely_rtt_timer_sync_can_net(struct lely_rtt_runtime *runtime)
+{
+    struct timespec now;
+
+    if (!runtime || !runtime->timer || !runtime->can_net)
+        return;
+    if (lely_rtt_time_now(runtime, &now) != RT_EOK)
+        return;
+    if (io_clock_settime(io_timer_get_clock(runtime->timer), &now) == -1)
+        return;
+
+    /*
+     * CANopen relative timers derive deadlines from can_net time. The owner
+     * calls this only after draining work queued from the current RX/status
+     * batch, so protocol time cannot overtake an already received CAN frame.
+     */
+    (void)io_can_net_set_time(runtime->can_net);
 }
 
 /**

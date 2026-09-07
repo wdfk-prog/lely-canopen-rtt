@@ -4,7 +4,7 @@ B3 adds the RT-Thread hardware/time bridge while preserving the B2 single-owner 
 
 ## Runtime model
 
-`lely_rtt_runtime_start()` creates the owner thread. The RT CAN RX callback, CAN status callback and RT one-shot timer callback never call Lely directly. They only acquire a short runtime lifetime pin, wake the shared event and release the pin. The owner thread drains RX, advances the passive `io_user_timer` clock, injects CAN status changes and drains `ev_loop`.
+`lely_rtt_runtime_start()` creates the owner thread. The RT CAN RX callback, CAN status callback and RT one-shot timer callback never call Lely directly. They only acquire a short runtime lifetime pin, wake the shared event and release the pin. The owner thread drains RT CAN RX into the passive user channel, advances the `io_user_timer` clock, drains already queued Lely executor work, refreshes `can_net` protocol time before command dispatch, and then drains command-generated executor work.
 
 The public entry point is `port/rtthread/include/lely/rtthread/runtime.h`. Manual callers provide the CAN device name, bitrate, RX batch, owner-thread resources and lifecycle timeouts explicitly. The optional auto-init layer fills the same configuration structure from Kconfig defaults.
 
@@ -41,6 +41,8 @@ External callback lifetime (CAN RX/status and the RT deadline callback) uses an 
 The port extends `rt_tick_get()` into a monotonic uptime and converts it to `struct timespec`. The value is not UTC and is not a replacement for the C11 time ABI. Unsigned tick subtraction tolerates one RT tick counter wrap between owner samples.
 
 `io_user_timer` publishes its next absolute deadline through the `setnext` callback. The port arms an RT-Thread one-shot timer, rounding deadlines up to avoid early expiry. Deadlines farther than the RT-Thread half-range timer limit are reached through intermediate wakeups. If an RT one-shot timer cannot be armed, the runtime fails closed and requests owner shutdown instead of repeatedly self-waking.
+
+The passive `io_user_timer` clock and the internal `can_net` protocol clock are synchronized in two phases. The owner first advances passive time and drains RX/status/timer work already queued for the current wake, so a received CAN frame is not overtaken by its protocol timeout. Immediately before dispatching application Master commands, the owner refreshes passive time again and updates `can_net`; relative CSDO and other CANopen deadlines created after a long idle period therefore start from current protocol time instead of a stale network timestamp.
 
 ## CAN RX/TX
 

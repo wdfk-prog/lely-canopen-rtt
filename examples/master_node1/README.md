@@ -38,11 +38,18 @@ items remain unconfirmed:
 These are example-generation values, not product ABI. Confirm them before CAN
 HIL and regenerate the artifacts instead of adding policy to `runtime.c`.
 
-`dcfgen -r` also mirrors Node1 TPDO1 into the Master description. The checked-in
-first-stage OD therefore contains Master RPDO1 (`0x1400/0x1600`), a local mapped
-value (`0x2000:01`), and remote PDO metadata (`0x5800/0x5A00`) for Node1's
-`0x2001:00` mapping. This only establishes the generated/static OD structure;
-B4 does not add a generic application PDO API.
+`dcfgen -r` mirrors both Node1 PDO directions into the Master description. The
+checked-in OD contains Master RPDO1 (`0x1400/0x1600`) mapped to local
+`0x2000:01` for Node1 TPDO1 (`0x181`), plus Master TPDO1 (`0x1800/0x1A00`)
+mapped from local `0x2200:01` to Node1 RPDO1 (`0x201`). Remote mapping metadata
+is retained at `0x5800/0x5A00` and `0x5C00/0x5E00`. B5.2 applications update
+`0x2200:01` through the owner-safe local OD API and then call
+`lely_rtt_runtime_tpdo_event(runtime, 1)` (or `co tpdo event 1`).
+
+Node1 also exposes EMCY at `0x081`; the Master `0x1028:01` consumer entry is
+configured for that COB-ID. With the B6 bridge enabled, `co emcy` or
+`co emcy 1` reads the bounded remote EMCY history without exposing Lely objects
+to non-owner threads.
 
 ## Windows Host regeneration
 
@@ -71,8 +78,13 @@ There is no Master+Node1-specific generator anymore. Use the generic
 `tools\gen_sdev.ps1` directly so every YAML/DCF conversion follows one Host
 entry point. For this MCU example, keep the safety options shown below:
 `-CompactMaster` shrinks dcfgen's large `CompactSubObj=127/254` Manager arrays,
-`-NoStrings` omits optional OD names, `-NoHeader` preserves the project-maintained
-`master_sdev.h`, and `-MetaFile` refreshes the checked-in generation metadata.
+trims the explicit `0x1F22` Node-ID range to the configured network, embeds each
+concise DCF `UploadFile` as inline DOMAIN `ParameterValue` bytes, and materializes
+`master.bin` writes such as `0x1F87/0x1F88` into the static Master DCF. The file
+materialization is mandatory because this target has no runtime DCF/bin loader
+and builds with `LELY_NO_CO_OBJ_FILE=1`. `-NoStrings` omits optional OD names,
+`-NoHeader` preserves the project-maintained `master_sdev.h`, and `-MetaFile`
+refreshes the checked-in generation metadata.
 
 ```powershell
 .\tools\gen_sdev.ps1 `
@@ -90,14 +102,35 @@ entry point. For this MCU example, keep the safety options shown below:
 ```
 
 The compactor uses the highest configured remote node-ID from `0x1F81` for
-node-indexed Manager arrays, caps `0x1003` error history at 8 entries for this
-example, and rejects a compacted DCF that still estimates more than 256
-sub-objects. These are Host-generation safety limits; they do not move any
-product policy into `runtime.c`.
+node-indexed Manager arrays and the explicit `0x1F22` array, caps `0x1003` error
+history at 8 entries for this example, and rejects a compacted DCF that still
+estimates more than 256 sub-objects. It also consumes dcfgen `master.bin`; the
+checked-in `0x1F87:01` and `0x1F88:01` values therefore survive regeneration.
+`0x1F22:<node>` must contain the concise DCF bytes themselves, never a
+`nodeN.bin` filename. After `dcf2c`, the Host helper verifies/materializes the
+same DOMAIN bytes in `master_sdev.c` so an older bundled `dcf2c.exe` cannot
+silently publish `.dom = NULL`. These are Host-generation safety limits; they
+do not move any product policy into `runtime.c`.
 
 If a previous generation produced a very large `master_sdev.c`, rerun the
-generic command above after updating these tools. Its output must contain a line
-beginning with `Master DCF footprint estimate:` before the C file is published.
+generic command above after updating these tools. Its output must show
+`0x1F87:01`/`0x1F88:01` materialization, `0x1F22:01` embedding/static DOMAIN
+verification, and a line beginning with `Master DCF footprint estimate:` before
+the C file is published. For this Node1-only example, verify the artifacts with:
+
+```powershell
+Select-String -Path .\examples\master_node1\master.dcf -Pattern `
+    "SubNumber=2", "ParameterValue=01000000002000040000005A5AA5A5", `
+    "\[1F87Value\]", "\[1F88Value\]", "UploadFile="
+Select-String -Path .\examples\master_node1\master_sdev.c -Pattern `
+    "CO_DOMAIN_C", "CO_OBJ_FLAGS_PARAMETER_VALUE", `
+    "CO_OBJ_FLAGS_UPLOAD_FILE", "node1.bin"
+```
+
+The expected DCF contains `SubNumber=2`, the inline `ParameterValue`, and
+`[1F87Value]/[1F88Value]`; it must not contain `UploadFile=`. The C file
+contains `CO_DOMAIN_C` plus `CO_OBJ_FLAGS_PARAMETER_VALUE` and must not contain
+`CO_OBJ_FLAGS_UPLOAD_FILE` or `node1.bin`.
 
 The current Linux review environment cannot execute the bundled Windows
 `dcf2c.exe`, so Windows Host regeneration is still a manual verification item.

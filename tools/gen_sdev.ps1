@@ -319,6 +319,7 @@ $venvDcfGen = Join-Path $projectRoot ".venv\Scripts\dcfgen.exe"
 $venvPython = Join-Path $projectRoot ".venv\Scripts\python.exe"
 $bundledDcf2C = Join-Path $scriptDir "dcf2c.exe"
 $compactMasterScript = Join-Path $scriptDir "compact_master_dcf.py"
+$materializeSdevDomainsScript = Join-Path $scriptDir "materialize_sdev_domains.py"
 $resolveDcfgenYamlScript = Join-Path $scriptDir "resolve_dcfgen_yaml.py"
 
 $dcf2cResolveArgs = @{
@@ -450,6 +451,7 @@ Create it with the documented Windows dcf-tools setup, then rerun this script.
             }
 
             $compactDcf = Join-Path $stageRoot "master.compact.dcf"
+            $generatedMasterBin = Join-Path $stageRoot "master.bin"
             $compactArgs = @(
                 $compactMasterScript,
                 "--input", $generatedDcf,
@@ -457,6 +459,9 @@ Create it with the documented Windows dcf-tools setup, then rerun this script.
                 "--error-history-depth", [string]$ErrorHistoryDepth,
                 "--max-subobjects", [string]$MaxMasterSubObjects
             )
+            if (Test-Path -LiteralPath $generatedMasterBin -PathType Leaf) {
+                $compactArgs += @("--master-bin", $generatedMasterBin)
+            }
             Invoke-NativeTool -FilePath $venvPython -Arguments $compactArgs
             if (-not (Test-Path -LiteralPath $compactDcf -PathType Leaf) -or
                 (Get-Item -LiteralPath $compactDcf).Length -eq 0) {
@@ -502,6 +507,33 @@ Create it with the documented Windows dcf-tools setup, then rerun this script.
     if (-not (Test-Path -LiteralPath $stageC -PathType Leaf) -or
         (Get-Item -LiteralPath $stageC).Length -eq 0) {
         throw "dcf2c did not produce a non-empty $Name.c"
+    }
+
+    if ($CompactMaster) {
+        if (-not (Test-Path -LiteralPath $materializeSdevDomainsScript -PathType Leaf)) {
+            throw "Static DOMAIN materializer not found: $materializeSdevDomainsScript"
+        }
+        $materializeDomainArgs = @(
+            $materializeSdevDomainsScript,
+            "--dcf", $sourceDcf,
+            "--c", $stageC
+        )
+        Invoke-NativeTool -FilePath $venvPython -Arguments $materializeDomainArgs
+
+        # The MCU profile uses LELY_NO_CO_OBJ_FILE=1. A file-backed OD value
+        # would compile into a filename but could not be opened at runtime.
+        $fileBackedFlags = Select-String `
+            -LiteralPath $stageC `
+            -Pattern 'CO_OBJ_FLAGS_(UPLOAD|DOWNLOAD)_FILE' `
+            -Quiet
+        if ($fileBackedFlags) {
+            throw @"
+Compact Master output still contains file-backed object dictionary values.
+The RT-Thread MCU target uses LELY_NO_CO_OBJ_FILE=1, so 0x1F22 concise DCF
+entries must be materialized as inline DOMAIN ParameterValue bytes before dcf2c.
+Refusing to publish $Name.c.
+"@
+        }
     }
 
     $stageH = Join-Path $stageRoot "$Name.h"

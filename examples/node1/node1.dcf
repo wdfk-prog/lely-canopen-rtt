@@ -13,6 +13,8 @@ BaudRate_500=1
 BaudRate_800=1
 BaudRate_1000=1
 LSS_Supported=0
+NrOfRxPDO=1
+NrOfTxPDO=1
 
 [DeviceComissioning]
 NodeID=0x01
@@ -25,12 +27,15 @@ SupportedObjects=3
 3=0x1018
 
 [OptionalObjects]
-SupportedObjects=5
-1=0x1017
-2=0x1200
-3=0x1800
-4=0x1A00
-5=0x1F80
+SupportedObjects=8
+1=0x1014
+2=0x1017
+3=0x1200
+4=0x1400
+5=0x1600
+6=0x1800
+7=0x1A00
+8=0x1F80
 
 [ManufacturerObjects]
 SupportedObjects=2
@@ -48,6 +53,12 @@ ParameterName=Error register
 DataType=0x0005
 AccessType=ro
 DefaultValue=0x00
+
+[1014]
+ParameterName=COB-ID EMCY
+DataType=0x0007
+AccessType=rw
+DefaultValue=$NODEID+0x80
 
 [1017]
 ParameterName=Producer heartbeat time
@@ -114,6 +125,46 @@ DataType=0x0007
 AccessType=ro
 DefaultValue=0x00000581
 
+
+[1400]
+SubNumber=3
+ParameterName=Receive PDO 1 communication parameter
+ObjectType=0x09
+
+[1400sub0]
+ParameterName=Highest sub-index supported
+DataType=0x0005
+AccessType=const
+DefaultValue=2
+
+[1400sub1]
+ParameterName=COB-ID used by RPDO 1
+DataType=0x0007
+AccessType=rw
+DefaultValue=0x00000201
+
+[1400sub2]
+ParameterName=Transmission type
+DataType=0x0005
+AccessType=rw
+DefaultValue=255
+
+[1600]
+SubNumber=2
+ParameterName=Receive PDO 1 mapping parameter
+ObjectType=0x09
+
+[1600sub0]
+ParameterName=Number of mapped application objects
+DataType=0x0005
+AccessType=rw
+DefaultValue=1
+
+[1600sub1]
+ParameterName=Mapped object 1
+DataType=0x0007
+AccessType=rw
+DefaultValue=0x20000020
 
 [1800]
 SubNumber=3

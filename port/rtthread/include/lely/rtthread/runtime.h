@@ -7,6 +7,11 @@
  * 2026-09-04     wdfk-prog         add CANopen node and command ingress APIs
  * 2026-09-05     wdfk-prog         correct B4 role to an NMT master runtime
  * 2026-09-05     wdfk-prog         add Master NMT/SDO command APIs for MSH
+ * 2026-09-05     wdfk-prog         add NMT configuration, local OD and TIME APIs
+ * 2026-09-06     wdfk-prog         clarify CFG restore and TIME lifetime contracts
+ * 2026-09-06     wdfk-prog         document snapshot reader scheduling contract
+ * 2026-09-06     wdfk-prog         add B5.2 TPDO and B6 EMCY application APIs
+ * 2026-09-06     wdfk-prog         document synchronous API thread-context contract
  */
 
 /**
@@ -55,6 +60,52 @@ enum lely_rtt_nmt_command {
     LELY_RTT_NMT_COMMAND_RESET_COMM, /**< Reset communication parameters only. */
 };
 #endif /* defined(PKG_LELY_USING_MASTER_COMMAND) */
+
+#if defined(PKG_LELY_USING_MASTER_NMT_CFG)
+/** @brief Terminal classification of one manual NMT configuration request. */
+enum lely_rtt_nmt_cfg_completion_status {
+    LELY_RTT_NMT_CFG_COMPLETION_OK = 0,
+    LELY_RTT_NMT_CFG_COMPLETION_ABORT,
+    LELY_RTT_NMT_CFG_COMPLETION_CANCELED,
+    LELY_RTT_NMT_CFG_COMPLETION_LOCAL_ERROR,
+};
+
+/** @brief Terminal result returned by lely_rtt_runtime_nmt_configure(). */
+struct lely_rtt_nmt_cfg_result {
+    rt_uint8_t node_id; /**< Remote node that owned the configuration request. */
+    enum lely_rtt_nmt_cfg_completion_status status; /**< Terminal classification. */
+    rt_err_t local_error; /**< Local dispatch error for LOCAL_ERROR. */
+    rt_uint32_t abort_code; /**< SDO abort code, or zero when absent. */
+};
+#endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
+
+#if defined(PKG_LELY_USING_MASTER_EMCY)
+/** Number of manufacturer-specific bytes carried by one CiA 301 EMCY frame. */
+#define LELY_RTT_EMCY_MSEF_SIZE 5u
+
+/** @brief Retained metadata for one received remote CANopen EMCY frame. */
+struct lely_rtt_emcy_event {
+    rt_uint8_t node_id; /**< Remote EMCY producer Node-ID. */
+    rt_uint16_t error_code; /**< Emergency error code (EEC). */
+    rt_uint8_t error_register; /**< Error register byte from the frame. */
+    rt_uint8_t manufacturer[LELY_RTT_EMCY_MSEF_SIZE]; /**< Manufacturer field. */
+    rt_uint32_t sequence; /**< Receive sequence; UINT32_MAX wraps to 1, zero is reserved. */
+};
+#endif /* defined(PKG_LELY_USING_MASTER_EMCY) */
+
+#if defined(PKG_LELY_USING_MASTER_TIME)
+/** @brief Enable reception of CANopen TIME frames on object 0x1012's CAN-ID. */
+#define LELY_RTT_TIME_ROLE_CONSUMER (1u << 0)
+/** @brief Permit explicit application-triggered CANopen TIME transmission. */
+#define LELY_RTT_TIME_ROLE_PRODUCER (1u << 1)
+
+/** @brief Last absolute CANopen TIME value received by the local Master. */
+struct lely_rtt_time_value {
+    rt_int64_t seconds; /**< Unix seconds corresponding to the received TIME value. */
+    rt_int32_t nanoseconds; /**< Fractional nanoseconds; TIME resolution is 1 ms. */
+    rt_uint32_t sequence; /**< Increments for each stable received TIME snapshot. */
+};
+#endif /* defined(PKG_LELY_USING_MASTER_TIME) */
 
 #if defined(PKG_LELY_USING_MASTER_SDO)
 /**
@@ -348,6 +399,262 @@ rt_err_t lely_rtt_runtime_get_remote_boot_status(lely_rtt_runtime_t *runtime,
 rt_err_t lely_rtt_runtime_post_nmt(lely_rtt_runtime_t *runtime,
         enum lely_rtt_nmt_command command, rt_uint8_t node_id);
 #endif /* defined(PKG_LELY_USING_MASTER_COMMAND) */
+
+#if defined(PKG_LELY_USING_MASTER_NMT_CFG)
+/**
+ * @brief Run one Lely NMT configuration request for a remote node.
+ *
+ * The call crosses the single-owner boundary and waits until the Lely
+ * configuration service completes, is canceled by runtime teardown/NMT reset,
+ * or fails locally. The protocol timeout is passed to co_nmt_cfg_req(). There
+ * is no second caller-side wait timeout: the stack-backed request must remain
+ * alive until the owner or Lely callback publishes a terminal result. The
+ * caller must therefore be a normal non-owner RT-Thread thread. Do not call
+ * this API from ISR or scheduler-locked context.
+ *
+ * A useful request must have embedded concise DCF data at 0x1F22 or an
+ * owner-installed Lely cfg_ind callback. Requests that would enter Lely's
+ * 0x1F8A restore/reset path are rejected with LOCAL_ERROR/-RT_ENOSYS because
+ * the current Master cannot safely arbitrate that Boot-up handshake with
+ * automatic NMT boot. Missing supported work uses the same fail-closed result.
+ *
+ * @param runtime Started runtime with a configured local NMT Master.
+ * @param node_id Remote Node-ID in the range 1..127.
+ * @param timeout_ms Configuration/SDO timeout in milliseconds; 1..INT_MAX.
+ * @param result Output terminal result when the function returns RT_EOK.
+ * @return RT_EOK after a terminal result, or an RT-Thread admission/IPC error.
+ */
+rt_err_t lely_rtt_runtime_nmt_configure(lely_rtt_runtime_t *runtime,
+        rt_uint8_t node_id, rt_uint32_t timeout_ms,
+        struct lely_rtt_nmt_cfg_result *result);
+#endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
+
+#if defined(PKG_LELY_USING_LOCAL_OD)
+/** @brief Origin of the most recent successful manufacturer OD write. */
+enum lely_rtt_local_od_change_source {
+    /** Write entered through lely_rtt_runtime_local_od_write(). */
+    LELY_RTT_LOCAL_OD_CHANGE_LOCAL_API = 0,
+    /** Write entered through Lely protocol processing (for example SSDO/RPDO). */
+    LELY_RTT_LOCAL_OD_CHANGE_PROTOCOL,
+};
+
+/**
+ * @brief Stable metadata snapshot for the latest successful local OD write.
+ *
+ * The snapshot contains metadata only. Call lely_rtt_runtime_local_od_read()
+ * when the current value is needed. Protocol-originated writes include any
+ * Lely download path that reaches the watched manufacturer-specific object,
+ * such as Server-SDO and RPDO processing.
+ */
+struct lely_rtt_local_od_change {
+    rt_uint16_t index; /**< Changed manufacturer-specific object index. */
+    rt_uint8_t subindex; /**< Changed sub-index. */
+    enum lely_rtt_local_od_change_source source; /**< Write origin class. */
+    rt_uint32_t size; /**< Transfer size in bytes, saturated at UINT32_MAX. */
+    rt_uint32_t sequence; /**< Increments for each stable published change. */
+};
+
+/**
+ * @brief Copy one manufacturer-specific local OD value through the owner.
+ *
+ * Only indices 0x2000..0x5FFF are exposed. The returned allocation belongs to
+ * the caller and must be released with lely_rtt_local_od_free(). Remote
+ * Server-SDO access and this API observe the same local co_dev object. The
+ * returned bytes use CANopen SDO transfer encoding. The call is synchronous
+ * across the owner queue so the stack-backed request remains valid until the
+ * owner has finished the SDO-style upload indication. Invoke it only from a
+ * normal schedulable non-owner thread; do not call from ISR or scheduler-locked
+ * context.
+ *
+ * @param runtime Started runtime with a configured local Master object dictionary.
+ * @param index Manufacturer-specific object index (0x2000..0x5FFF).
+ * @param subindex Object sub-index.
+ * @param data Output caller-owned copy; may be RT_NULL when size is zero.
+ * @param size Output copied byte count.
+ * @return RT_EOK on success, or an RT-Thread/local OD error.
+ */
+rt_err_t lely_rtt_runtime_local_od_read(lely_rtt_runtime_t *runtime,
+        rt_uint16_t index, rt_uint8_t subindex, void **data, rt_size_t *size);
+
+/**
+ * @brief Write one manufacturer-specific local OD value through the owner.
+ *
+ * The owner invokes the same Lely sub-object download indication path used by
+ * Server-SDO, including OD access/type checks and application download hooks.
+ * The input bytes therefore use CANopen SDO transfer encoding. The synchronous
+ * call keeps the caller-owned input valid until that indication has completed.
+ * Invoke it only from a normal schedulable non-owner thread; do not call from
+ * ISR or scheduler-locked context.
+ *
+ * @param runtime Started runtime with a configured local Master object dictionary.
+ * @param index Manufacturer-specific object index (0x2000..0x5FFF).
+ * @param subindex Object sub-index.
+ * @param data Bytes copied into the local OD while the caller remains blocked.
+ * @param size Number of bytes at data; must be non-zero.
+ * @return RT_EOK on success, or an RT-Thread/local OD error.
+ */
+rt_err_t lely_rtt_runtime_local_od_write(lely_rtt_runtime_t *runtime,
+        rt_uint16_t index, rt_uint8_t subindex, const void *data, rt_size_t size);
+
+/**
+ * @brief Release a buffer returned by lely_rtt_runtime_local_od_read().
+ * @param data Buffer returned by the local OD read API; RT_NULL is accepted.
+ */
+void lely_rtt_local_od_free(void *data);
+
+/**
+ * @brief Read the latest successful manufacturer OD write metadata.
+ *
+ * The owner publishes the snapshot after the existing Lely download
+ * indication accepts a non-empty final transfer segment. Zero-length/preflight
+ * indications are not reported as value changes. The wrapper preserves and
+ * chains the original indication, so Server-SDO/RPDO behavior is not replaced.
+ * If a read races owner publication, it may sleep briefly before retrying so a
+ * lower-priority owner can complete the seqlock update. Call this API only from
+ * normal schedulable thread context, not from ISR or scheduler-locked context.
+ *
+ * @param runtime Runtime handle.
+ * @param change Output stable write metadata snapshot.
+ * @return RT_EOK when a write has been observed, -RT_EBUSY before the first
+ *         write or after runtime reset/teardown, or -RT_EINVAL for bad input.
+ */
+rt_err_t lely_rtt_runtime_get_local_od_change(lely_rtt_runtime_t *runtime,
+        struct lely_rtt_local_od_change *change);
+#endif /* defined(PKG_LELY_USING_LOCAL_OD) */
+
+#if defined(PKG_LELY_USING_MASTER_PDO_TX)
+/**
+ * @brief Trigger one statically configured event-driven local TPDO.
+ *
+ * The local NMT state must be Operational because Lely only owns PDO services
+ * in that state. The TPDO must already be valid, event-driven (type 254/255),
+ * non-MPDO and have a non-empty static mapping. Update mapped manufacturer OD
+ * values through lely_rtt_runtime_local_od_write() before calling this API.
+ * Dynamic mapping and synchronous TPDO triggering are intentionally excluded.
+ * This call waits for owner completion; invoke it only from a normal schedulable
+ * non-owner thread, never from ISR or scheduler-locked context.
+ *
+ * @param runtime Started runtime with a configured local Master.
+ * @param pdo_number Local TPDO number in the range 1..CO_NUM_PDOS.
+ * @return RT_EOK after Lely accepts the event, -RT_EBUSY when the PDO service
+ *         is inactive, -RT_EINVAL for invalid/non-event-driven configuration,
+ *         or another owner/IPC/local error.
+ */
+rt_err_t lely_rtt_runtime_tpdo_event(lely_rtt_runtime_t *runtime,
+        rt_uint16_t pdo_number);
+#endif /* defined(PKG_LELY_USING_MASTER_PDO_TX) */
+
+#if defined(PKG_LELY_USING_MASTER_EMCY)
+/**
+ * @brief Read the newest retained remote EMCY, optionally filtered by Node-ID.
+ *
+ * @p node_id 0 selects the newest event from any configured remote producer;
+ * 1..127 selects the newest retained event from that producer. The history is
+ * bounded by PKG_LELY_MASTER_EMCY_HISTORY_DEPTH, so an older node-specific
+ * event can be overwritten by newer traffic. Sequence UINT32_MAX wraps to 1;
+ * lookup treats that wrap as a new history epoch and does not search older
+ * pre-wrap entries. If a read races owner publication, the caller may sleep
+ * briefly and retry; use normal schedulable thread context.
+ *
+ * @param runtime Runtime handle.
+ * @param node_id Zero for any producer, or a remote Node-ID in 1..127.
+ * @param event Output stable retained event.
+ * @return RT_EOK when found, -RT_EBUSY when no matching retained event exists,
+ *         or -RT_EINVAL for invalid arguments.
+ */
+rt_err_t lely_rtt_runtime_get_emcy(lely_rtt_runtime_t *runtime,
+        rt_uint8_t node_id, struct lely_rtt_emcy_event *event);
+
+/**
+ * @brief Push and broadcast one local Master EMCY through Lely's owner service.
+ *
+ * The local NMT state must provide an active EMCY service (Pre-op/Operational)
+ * and object 0x1014 must enable the local producer COB-ID. Lely maintains
+ * object 0x1003 and the combined 0x1001 error register; it also
+ * sets the generic-error bit required for a non-zero error condition. This
+ * synchronous call must run in a normal schedulable non-owner thread; do not
+ * call it from ISR or scheduler-locked context.
+ *
+ * @param runtime Started runtime with a configured local Master.
+ * @param error_code Non-zero CiA 301/profile/manufacturer emergency error code.
+ * @param error_register Error-register bits associated with this error.
+ * @param manufacturer Optional five-byte manufacturer field; RT_NULL means zero.
+ * @return RT_EOK on success, -RT_EBUSY while EMCY/the producer is inactive,
+ *         or another owner/IPC/local error.
+ */
+rt_err_t lely_rtt_runtime_emcy_push(lely_rtt_runtime_t *runtime,
+        rt_uint16_t error_code, rt_uint8_t error_register,
+        const rt_uint8_t manufacturer[LELY_RTT_EMCY_MSEF_SIZE]);
+
+/**
+ * @brief Pop the newest local Master EMCY error and broadcast the reset update.
+ *
+ * This synchronous call must run in a normal schedulable non-owner thread; do
+ * not call it from ISR or scheduler-locked context.
+ *
+ * @param runtime Started runtime with an active local EMCY producer.
+ * @return RT_EOK on success/no active local error, -RT_EBUSY while inactive,
+ *         or another owner/IPC/local error.
+ */
+rt_err_t lely_rtt_runtime_emcy_pop(lely_rtt_runtime_t *runtime);
+
+/**
+ * @brief Clear all local Master EMCY errors and broadcast error reset/no-error.
+ *
+ * This synchronous call must run in a normal schedulable non-owner thread; do
+ * not call it from ISR or scheduler-locked context.
+ *
+ * @param runtime Started runtime with an active local EMCY producer.
+ * @return RT_EOK on success, -RT_EBUSY while inactive, or another local error.
+ */
+rt_err_t lely_rtt_runtime_emcy_clear(lely_rtt_runtime_t *runtime);
+#endif /* defined(PKG_LELY_USING_MASTER_EMCY) */
+
+#if defined(PKG_LELY_USING_MASTER_TIME)
+/**
+ * @brief Configure CANopen TIME consumer/explicit-producer role bits.
+ *
+ * The CAN-ID and frame-format bits already stored in object 0x1012 are
+ * preserved. Producer mode permits explicit send but does not start periodic
+ * production because the RT port clock is monotonic uptime, not wall time. This
+ * synchronous call must run in a normal schedulable non-owner thread; do not
+ * call it from ISR or scheduler-locked context.
+ *
+ * @param runtime Started runtime with a configured local Master.
+ * @param roles Bitwise OR of LELY_RTT_TIME_ROLE_CONSUMER/PRODUCER, or zero.
+ * @return RT_EOK on success, -RT_EBUSY while TIME is inactive, or local error.
+ */
+rt_err_t lely_rtt_runtime_time_configure(lely_rtt_runtime_t *runtime,
+        rt_uint8_t roles);
+
+/**
+ * @brief Send one explicit absolute CANopen TIME value immediately.
+ *
+ * This synchronous call must run in a normal schedulable non-owner thread; do
+ * not call it from ISR or scheduler-locked context.
+ *
+ * @param runtime Started runtime with a configured local Master.
+ * @param seconds Absolute Unix seconds representable by CANopen TIME.
+ * @param nanoseconds Fractional nanoseconds in the range 0..999999999.
+ * @return RT_EOK on successful CAN submission, or an RT-Thread/local error.
+ */
+rt_err_t lely_rtt_runtime_time_send(lely_rtt_runtime_t *runtime,
+        rt_int64_t seconds, rt_int32_t nanoseconds);
+
+/**
+ * @brief Read the latest owner-published CANopen TIME consumer snapshot.
+ *
+ * If a read races publication, it may sleep briefly before retrying. Call only
+ * from normal schedulable thread context, not ISR or scheduler-locked context.
+ *
+ * @param runtime Runtime handle.
+ * @param value Output stable absolute timestamp snapshot.
+ * @return RT_EOK when available, -RT_EBUSY before the first TIME reception, or
+ *         -RT_EINVAL for invalid arguments.
+ */
+rt_err_t lely_rtt_runtime_get_time(lely_rtt_runtime_t *runtime,
+        struct lely_rtt_time_value *value);
+#endif /* defined(PKG_LELY_USING_MASTER_TIME) */
 
 #if defined(PKG_LELY_USING_MASTER_SDO)
 /**
