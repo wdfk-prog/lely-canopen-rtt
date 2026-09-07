@@ -6,6 +6,15 @@ CompactSubObj=127/254. Lely's DCF loader expands every compact sub-object, and
 co_dev_create_from_sdev() later allocates matching dynamic co_sub objects on the
 target. This helper keeps the generated DCF semantics needed by the configured
 network while reducing those expansion ranges for memory-constrained targets.
+
+For fileless MCU builds, it also materializes the dcfgen-generated 0x1F22
+UploadFile references into inline DOMAIN ParameterValue bytes. This is required
+when LELY_NO_CO_OBJ_FILE=1 because the target cannot open the concise DCF file.
+
+dcfgen may additionally emit master.bin with writes that initialize the static
+Master object dictionary (for example 0x1F87/0x1F88 identity expectations).
+Those writes are materialized into the compact DCF as well, because this MCU
+profile has no runtime master.bin loader.
 """
 
 from __future__ import annotations
@@ -20,6 +29,10 @@ SECTION_RE = re.compile(r"^\s*\[([^\]]+)\]\s*$")
 KEY_VALUE_RE = re.compile(r"^(\s*)([^=]+?)(\s*=\s*)(.*?)(\r?\n)?$")
 OBJECT_RE = re.compile(r"^[0-9A-Fa-f]{4}$")
 VALUE_SECTION_RE = re.compile(r"^([0-9A-Fa-f]{4})Value$", re.IGNORECASE)
+TPDO_RESERVED_SUB4_RE = re.compile(
+    r"^([0-9A-Fa-f]{4})sub0?4$", re.IGNORECASE
+)
+CONCISE_DCF_SUB_RE = re.compile(r"^1F22sub([0-9A-Fa-f]{1,2})$", re.IGNORECASE)
 
 # These compact arrays are indexed by CANopen node-ID. Keeping sub-indices up to
 # the highest configured node preserves the access pattern used by NMT/boot
@@ -46,6 +59,164 @@ class Section:
     name: str
     start: int
     end: int
+
+
+@dataclass
+class EmbeddedConciseDcf:
+    subidx: int
+    filename: str
+    size: int
+    entries: int
+
+
+@dataclass(frozen=True)
+class ConciseDcfEntry:
+    index: int
+    subidx: int
+    data: bytes
+
+
+def parse_concise_dcf(data: bytes, source: Path) -> list[ConciseDcfEntry]:
+    """Parse the concise DCF layout consumed by co_csdo_dn_dcf_req()."""
+    if len(data) < 4:
+        raise ValueError(f"concise DCF is shorter than its 4-byte entry count: {source}")
+
+    count = int.from_bytes(data[0:4], "little")
+    entries: list[ConciseDcfEntry] = []
+    offset = 4
+    for entry in range(count):
+        if len(data) - offset < 7:
+            raise ValueError(
+                f"concise DCF entry {entry + 1}/{count} has a truncated header: {source}"
+            )
+        index = int.from_bytes(data[offset : offset + 2], "little")
+        subidx = data[offset + 2]
+        size = int.from_bytes(data[offset + 3 : offset + 7], "little")
+        offset += 7
+        if len(data) - offset < size:
+            raise ValueError(
+                f"concise DCF entry {entry + 1}/{count} has {len(data) - offset} "
+                f"data bytes but declares {size}: {source}"
+            )
+        entries.append(
+            ConciseDcfEntry(
+                index=index, subidx=subidx, data=data[offset : offset + size]
+            )
+        )
+        offset += size
+
+    if offset != len(data):
+        raise ValueError(
+            f"concise DCF has {len(data) - offset} trailing bytes after {count} entries: {source}"
+        )
+    return entries
+
+
+def _newline_for(text: str) -> str:
+    return "\r\n" if "\r\n" in text else "\n"
+
+
+def _format_u32(data: bytes, source: Path, index: int, subidx: int) -> str:
+    if len(data) != 4:
+        raise ValueError(
+            f"master.bin entry 0x{index:04X}:{subidx:02X} must be 4 bytes, "
+            f"got {len(data)}: {source}"
+        )
+    return f"0x{int.from_bytes(data, 'little'):08X}"
+
+
+def _upsert_section_value(text: str, section_name: str, key: str, value: str) -> str:
+    lines = text.splitlines(keepends=True)
+    sections = collect_sections(lines)
+    by_name = {section.name.casefold(): section for section in sections}
+    section = by_name.get(section_name.casefold())
+    if section is None:
+        raise ValueError(f"master.bin targets missing DCF section [{section_name}]")
+    values = section_values(lines, section)
+    existing = values.get(key.casefold())
+    if existing is not None:
+        lines[existing[1]] = replace_key_value(lines[existing[1]], key, value)
+        return "".join(lines)
+
+    newline = _newline_for(text)
+    insert_at = section.end
+    while insert_at > section.start + 1 and not lines[insert_at - 1].strip():
+        insert_at -= 1
+    lines.insert(insert_at, f"{key}={value}{newline}")
+    return "".join(lines)
+
+
+def _upsert_compact_value(text: str, index: int, subidx: int, value: str) -> str:
+    section_name = f"{index:04X}Value"
+    lines = text.splitlines(keepends=True)
+    sections = collect_sections(lines)
+    by_name = {section.name.casefold(): section for section in sections}
+    section = by_name.get(section_name.casefold())
+    newline = _newline_for(text)
+
+    if section is None:
+        parent = by_name.get(f"{index:04X}".casefold())
+        if parent is None:
+            raise ValueError(f"master.bin targets missing DCF object 0x{index:04X}")
+        block = [
+            f"[{section_name}]{newline}",
+            f"NrOfEntries=1{newline}",
+            f"{subidx}={value}{newline}",
+            newline,
+        ]
+        lines[parent.end:parent.end] = block
+        return "".join(lines)
+
+    existing_values: dict[int, str] = {}
+    for line_index in range(section.start + 1, section.end):
+        match = KEY_VALUE_RE.match(lines[line_index])
+        if not match:
+            continue
+        key = match.group(2).strip()
+        if key.casefold() == "nrofentries":
+            continue
+        parsed = parse_positive_int(key)
+        if parsed is not None and parsed > 0:
+            existing_values[parsed] = match.group(4).strip()
+    existing_values[subidx] = value
+
+    block = [f"[{section_name}]{newline}", f"NrOfEntries={len(existing_values)}{newline}"]
+    for key in sorted(existing_values):
+        block.append(f"{key}={existing_values[key]}{newline}")
+    block.append(newline)
+    lines[section.start:section.end] = block
+    return "".join(lines)
+
+
+def materialize_master_bin(text: str, master_bin: Path | None) -> tuple[str, list[str]]:
+    """Apply dcfgen master.bin writes to the static Master DCF."""
+    if master_bin is None or not master_bin.is_file():
+        return text, []
+
+    entries = parse_concise_dcf(master_bin.read_bytes(), master_bin)
+    materialized: list[str] = []
+    for entry in entries:
+        if entry.index == 0x1018 and entry.subidx == 0x04:
+            text = _upsert_section_value(
+                text,
+                "1018sub4",
+                "ParameterValue",
+                _format_u32(entry.data, master_bin, entry.index, entry.subidx),
+            )
+        elif entry.index in {0x1F55, 0x1F87, 0x1F88} and 1 <= entry.subidx <= 127:
+            text = _upsert_compact_value(
+                text,
+                entry.index,
+                entry.subidx,
+                _format_u32(entry.data, master_bin, entry.index, entry.subidx),
+            )
+        else:
+            raise ValueError(
+                f"unsupported master.bin entry for static materialization: "
+                f"0x{entry.index:04X}:{entry.subidx:02X} ({len(entry.data)} bytes)"
+            )
+        materialized.append(f"0x{entry.index:04X}:{entry.subidx:02X}")
+    return text, materialized
 
 
 def parse_positive_int(text: str) -> int | None:
@@ -98,12 +269,174 @@ def numeric_value_keys(lines: list[str], section: Section) -> list[int]:
     return keys
 
 
-def replace_value(line: str, new_value: int) -> str:
+def replace_key_value(line: str, new_key: str | None, new_value: str) -> str:
     match = KEY_VALUE_RE.match(line)
     if not match:
         raise ValueError(f"cannot rewrite DCF key/value line: {line!r}")
     newline = match.group(5) or ""
-    return f"{match.group(1)}{match.group(2)}{match.group(3)}{new_value}{newline}"
+    key = new_key if new_key is not None else match.group(2)
+    return f"{match.group(1)}{key}{match.group(3)}{new_value}{newline}"
+
+
+def replace_raw_value(line: str, new_value: str) -> str:
+    return replace_key_value(line, None, new_value)
+
+
+def replace_value(line: str, new_value: int) -> str:
+    return replace_raw_value(line, str(new_value))
+
+
+def strip_reserved_tpdo_sub4(text: str) -> tuple[str, list[str]]:
+    """Remove reserved TPDO communication sub-index 04h from a dcfgen DCF."""
+    lines = text.splitlines(keepends=True)
+    sections = collect_sections(lines)
+    by_name = {section.name.casefold(): section for section in sections}
+    removals: list[Section] = []
+    removed_objects: list[str] = []
+
+    for section in sections:
+        match = TPDO_RESERVED_SUB4_RE.fullmatch(section.name)
+        if not match:
+            continue
+        obj_index = int(match.group(1), 16)
+        if obj_index < 0x1800 or obj_index > 0x19FF:
+            continue
+
+        parent = by_name.get(match.group(1).casefold())
+        if parent is None:
+            raise ValueError(
+                f"TPDO communication sub-index without parent object: [{section.name}]"
+            )
+        values = section_values(lines, parent)
+        subnumber = values.get("subnumber")
+        if subnumber is None:
+            raise ValueError(
+                f"TPDO communication object 0x{obj_index:04X} has no SubNumber"
+            )
+        count = parse_positive_int(subnumber[0])
+        if count is None or count <= 0:
+            raise ValueError(
+                f"invalid SubNumber for TPDO communication object 0x{obj_index:04X}"
+            )
+        lines[subnumber[1]] = replace_value(lines[subnumber[1]], count - 1)
+        removals.append(section)
+        removed_objects.append(f"{obj_index:04X}")
+
+    for section in sorted(removals, key=lambda item: item.start, reverse=True):
+        del lines[section.start:section.end]
+
+    return "".join(lines), removed_objects
+
+
+def validate_concise_dcf(data: bytes, source: Path) -> int:
+    """Validate the binary layout consumed by co_csdo_dn_dcf_req()."""
+    return len(parse_concise_dcf(data, source))
+
+
+def materialize_and_compact_1f22(
+    text: str, *, input_dir: Path, max_node_id: int
+) -> tuple[str, list[EmbeddedConciseDcf], tuple[int, int] | None]:
+    """Inline 0x1F22 UploadFile data and trim unused explicit node entries."""
+    lines = text.splitlines(keepends=True)
+    sections = collect_sections(lines)
+    by_name = {section.name.casefold(): section for section in sections}
+    parent = by_name.get("1f22")
+    if parent is None:
+        return text, [], None
+
+    parent_values = section_values(lines, parent)
+    subnumber = parent_values.get("subnumber")
+    if subnumber is None:
+        raise ValueError("object 0x1F22 has no SubNumber")
+    original_subnumber = parse_positive_int(subnumber[0])
+    if original_subnumber is None or original_subnumber <= 0:
+        raise ValueError("object 0x1F22 has an invalid SubNumber")
+
+    target_subnumber = max_node_id + 1
+    if original_subnumber < target_subnumber:
+        raise ValueError(
+            f"object 0x1F22 SubNumber={original_subnumber} does not cover node-ID {max_node_id}"
+        )
+    if target_subnumber < original_subnumber:
+        lines[subnumber[1]] = replace_value(lines[subnumber[1]], target_subnumber)
+
+    sub0 = by_name.get("1f22sub0")
+    if sub0 is None:
+        raise ValueError("object 0x1F22 is missing sub-index 0")
+    sub0_values = section_values(lines, sub0)
+    highest = sub0_values.get("defaultvalue")
+    if highest is None:
+        raise ValueError("object 0x1F22:00 has no DefaultValue")
+    lines[highest[1]] = replace_value(lines[highest[1]], max_node_id)
+
+    base_dir = input_dir.resolve()
+    removals: list[Section] = []
+    embedded: list[EmbeddedConciseDcf] = []
+
+    for section in sections:
+        match = CONCISE_DCF_SUB_RE.fullmatch(section.name)
+        if not match:
+            continue
+        subidx = int(match.group(1), 16)
+        if subidx > max_node_id:
+            removals.append(section)
+            continue
+        if subidx == 0:
+            continue
+
+        values = section_values(lines, section)
+        upload = values.get("uploadfile")
+        if upload is None:
+            continue
+        if values.get("parametervalue") is not None:
+            raise ValueError(
+                f"object 0x1F22:{subidx:02X} contains both UploadFile and ParameterValue"
+            )
+
+        filename = upload[0].strip().strip('"')
+        source = (base_dir / filename).resolve()
+        try:
+            source.relative_to(base_dir)
+        except ValueError as exc:
+            raise ValueError(
+                f"object 0x1F22:{subidx:02X} UploadFile escapes the DCF staging directory: "
+                f"{filename}"
+            ) from exc
+        if not source.is_file():
+            raise ValueError(
+                f"object 0x1F22:{subidx:02X} concise DCF file not found: {source}"
+            )
+
+        data = source.read_bytes()
+        entries = validate_concise_dcf(data, source)
+        lines[upload[1]] = replace_key_value(
+            lines[upload[1]], "ParameterValue", data.hex().upper()
+        )
+        embedded.append(
+            EmbeddedConciseDcf(
+                subidx=subidx, filename=filename, size=len(data), entries=entries
+            )
+        )
+
+    for section in sorted(removals, key=lambda item: item.start, reverse=True):
+        del lines[section.start : section.end]
+
+    output = "".join(lines)
+    output_lines = output.splitlines(keepends=True)
+    for section in collect_sections(output_lines):
+        match = CONCISE_DCF_SUB_RE.fullmatch(section.name)
+        if not match or int(match.group(1), 16) == 0:
+            continue
+        values = section_values(output_lines, section)
+        if "uploadfile" in values:
+            raise ValueError(
+                f"object 0x1F22:{int(match.group(1), 16):02X} still contains UploadFile"
+            )
+
+    range_change = None
+    if target_subnumber != original_subnumber:
+        range_change = (original_subnumber - 1, max_node_id)
+    return output, embedded, range_change
 
 
 def estimate_subobjects(lines: list[str], sections: list[Section]) -> tuple[int, int]:
@@ -134,9 +467,29 @@ def estimate_subobjects(lines: list[str], sections: list[Section]) -> tuple[int,
 def compact_dcf(
     text: str,
     *,
+    input_dir: Path,
+    master_bin: Path | None,
     error_history_depth: int,
     max_subobjects: int,
-) -> tuple[str, list[tuple[str, int, int]], int, int, int, int, int]:
+) -> tuple[
+    str,
+    list[tuple[str, int, int]],
+    list[str],
+    list[str],
+    list[EmbeddedConciseDcf],
+    tuple[int, int] | None,
+    int,
+    int,
+    int,
+    int,
+    int,
+]:
+    text, materialized_master_bin = materialize_master_bin(text, master_bin)
+    original_lines = text.splitlines(keepends=True)
+    before_objects, before_subobjects = estimate_subobjects(
+        original_lines, collect_sections(original_lines)
+    )
+    text, removed_reserved_tpdo = strip_reserved_tpdo_sub4(text)
     lines = text.splitlines(keepends=True)
     sections = collect_sections(lines)
     by_name = {section.name.casefold(): section for section in sections}
@@ -147,6 +500,12 @@ def compact_dcf(
     if max_node_id > 127:
         raise ValueError(f"invalid CANopen node-ID in [1F81Value]: {max_node_id}")
 
+    text, embedded_1f22, concise_range_change = materialize_and_compact_1f22(
+        text, input_dir=input_dir, max_node_id=max_node_id
+    )
+    lines = text.splitlines(keepends=True)
+    sections = collect_sections(lines)
+
     explicit_value_keys: dict[str, list[int]] = {}
     for section in sections:
         match = VALUE_SECTION_RE.fullmatch(section.name)
@@ -154,7 +513,6 @@ def compact_dcf(
             continue
         explicit_value_keys[match.group(1).upper()] = numeric_value_keys(lines, section)
 
-    before_objects, before_subobjects = estimate_subobjects(lines, sections)
     changes: list[tuple[str, int, int]] = []
 
     for section in sections:
@@ -197,6 +555,10 @@ def compact_dcf(
     return (
         "".join(lines),
         changes,
+        removed_reserved_tpdo,
+        materialized_master_bin,
+        embedded_1f22,
+        concise_range_change,
         max_node_id,
         before_objects,
         before_subobjects,
@@ -209,6 +571,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", required=True, type=Path, help="dcfgen Master DCF")
     parser.add_argument("--output", required=True, type=Path, help="compacted DCF path")
+    parser.add_argument(
+        "--master-bin",
+        type=Path,
+        default=None,
+        help="optional dcfgen master.bin to materialize into the static Master DCF",
+    )
     parser.add_argument(
         "--error-history-depth",
         type=int,
@@ -241,6 +609,8 @@ def main() -> int:
             source = stream.read()
         result = compact_dcf(
             source,
+            input_dir=args.input.parent,
+            master_bin=args.master_bin,
             error_history_depth=args.error_history_depth,
             max_subobjects=args.max_subobjects,
         )
@@ -248,7 +618,19 @@ def main() -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    output_text, changes, max_node_id, before_obj, before_sub, after_obj, after_sub = result
+    (
+        output_text,
+        changes,
+        removed_reserved_tpdo,
+        materialized_master_bin,
+        embedded_1f22,
+        concise_range_change,
+        max_node_id,
+        before_obj,
+        before_sub,
+        after_obj,
+        after_sub,
+    ) = result
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temp = args.output.with_name(args.output.name + ".tmp")
     try:
@@ -264,6 +646,18 @@ def main() -> int:
         return 1
 
     print(f"Master DCF nodes: highest configured remote node-ID = {max_node_id}")
+    for index in removed_reserved_tpdo:
+        print(f"  0x{index}: removed reserved TPDO communication sub-index 04h")
+    for target in materialized_master_bin:
+        print(f"  {target}: materialized from master.bin")
+    if concise_range_change is not None:
+        old, new = concise_range_change
+        print(f"  0x1F22: explicit Node-ID range 1..{old} -> 1..{new}")
+    for item in embedded_1f22:
+        print(
+            f"  0x1F22:{item.subidx:02X}: embedded {item.filename} "
+            f"({item.size} bytes, {item.entries} entries)"
+        )
     for index, old, new in changes:
         print(f"  0x{index}: CompactSubObj {old} -> {new}")
     print(

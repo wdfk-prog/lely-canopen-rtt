@@ -4,7 +4,9 @@
  * Change Logs:
  * Date           Author            Notes
  * 2026-09-05     wdfk-prog         first version
+ * 2026-09-05     wdfk-prog         add synchronous owner request dispatch
  * 2026-09-06     wdfk-prog         support rt_mq_recv return semantics
+ * 2026-09-06     wdfk-prog         dispatch TPDO and EMCY owner-safe requests
  */
 
 /**
@@ -45,6 +47,94 @@ lely_rtt_master_command_release(struct lely_rtt_runtime *runtime)
 {
     if (runtime)
         rt_atomic_sub(&runtime->command_refs, 1);
+}
+
+rt_err_t
+lely_rtt_master_sync_init(struct lely_rtt_master_sync *sync, const char *name)
+{
+    rt_err_t err;
+
+    if (!sync || !name)
+        return -RT_EINVAL;
+
+    rt_memset(sync, 0, sizeof(*sync));
+    err = rt_event_init(&sync->event, name, RT_IPC_FLAG_FIFO);
+    if (err != RT_EOK)
+        return err;
+
+    sync->initialized = RT_TRUE;
+    rt_atomic_store(&sync->done, 0);
+    rt_atomic_store(&sync->completion_refs, 0);
+    sync->result = -RT_EBUSY;
+    return RT_EOK;
+}
+
+void
+lely_rtt_master_sync_complete(struct lely_rtt_master_sync *sync, rt_err_t result)
+{
+    if (!sync || !sync->initialized || rt_atomic_load(&sync->done))
+        return;
+
+    sync->result = result;
+    /*
+     * Publish the result before waking the caller. completion_refs pins the
+     * stack-embedded event if the waiter preempts us from rt_event_send().
+     */
+    rt_atomic_store(&sync->completion_refs, 1);
+    rt_atomic_store(&sync->done, 1);
+    if (rt_event_send(&sync->event, LELY_RTT_MASTER_SYNC_DONE) != RT_EOK)
+        LELY_RTT_LOG_E("Master synchronous completion event send failed");
+    rt_atomic_store(&sync->completion_refs, 0);
+}
+
+rt_err_t
+lely_rtt_master_sync_wait(struct lely_rtt_master_sync *sync)
+{
+    const rt_int32_t safety_ticks = lely_rtt_timeout_ticks(1000);
+    rt_bool_t receive_error_reported = RT_FALSE;
+
+    if (!sync || !sync->initialized)
+        return -RT_EINVAL;
+
+    /*
+     * The 1 s receive is only a lost-wakeup safety poll, not an operation
+     * timeout. Returning early would invalidate the queued stack request.
+     */
+    while (!rt_atomic_load(&sync->done)) {
+        rt_uint32_t events = 0;
+        rt_err_t err = rt_event_recv(&sync->event, LELY_RTT_MASTER_SYNC_DONE,
+                RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR, safety_ticks, &events);
+
+        if (err == -RT_ETIMEOUT)
+            continue;
+        if (err != RT_EOK) {
+            /*
+             * A posted command may still contain this stack pointer. Keep the
+             * caller pinned even if the IPC receive reports an unexpected
+             * error; owner completion remains the only safe lifetime barrier.
+             */
+            if (!receive_error_reported) {
+                LELY_RTT_LOG_E("Master synchronous wait event failed: %d", err);
+                receive_error_reported = RT_TRUE;
+            }
+            rt_thread_mdelay(1);
+        }
+    }
+
+    return sync->result;
+}
+
+void
+lely_rtt_master_sync_fini(struct lely_rtt_master_sync *sync)
+{
+    if (!sync || !sync->initialized)
+        return;
+
+    while (rt_atomic_load(&sync->completion_refs) != 0)
+        rt_thread_mdelay(1);
+
+    rt_event_detach(&sync->event);
+    sync->initialized = RT_FALSE;
 }
 
 void
@@ -149,7 +239,7 @@ lely_rtt_master_command_post(struct lely_rtt_runtime *runtime,
                 "owner safety poll will drain the queue", err);
         /*
          * mq_send() already transferred ownership to the runtime. Returning an
-         * enqueue error here would let an SDO caller reclaim storage still
+         * enqueue error here would let a request caller reclaim storage still
          * referenced by the queue. The owner has a bounded safety poll while
          * command ingress is enabled, so the queued command remains accepted
          * and will still reach dispatch/cleanup without relying on this wake.
@@ -210,6 +300,12 @@ lely_rtt_master_command_dispatch_nmt(struct lely_rtt_runtime *runtime,
         return;
     }
 
+#if defined(PKG_LELY_USING_MASTER_NMT_CFG)
+    /* Mark cancellation only after Lely accepted the NMT command. */
+    lely_rtt_master_cfg_on_nmt_command(runtime, node_id,
+            (enum lely_rtt_nmt_command)command->data.nmt.command);
+#endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
+
 #if defined(PKG_LELY_USING_MASTER_SDO)
     lely_rtt_master_sdo_on_nmt_command(runtime, node_id,
             (enum lely_rtt_nmt_command)command->data.nmt.command);
@@ -253,6 +349,31 @@ lely_rtt_master_command_dispatch(struct lely_rtt_runtime *runtime)
             lely_rtt_master_sdo_dispatch(runtime, command.data.sdo.request);
             break;
 #endif /* defined(PKG_LELY_USING_MASTER_SDO) */
+#if defined(PKG_LELY_USING_MASTER_NMT_CFG)
+        case LELY_RTT_MASTER_COMMAND_NMT_CFG:
+            lely_rtt_master_cfg_dispatch(runtime, command.data.cfg.request);
+            break;
+#endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
+#if defined(PKG_LELY_USING_LOCAL_OD)
+        case LELY_RTT_MASTER_COMMAND_LOCAL_OD:
+            lely_rtt_local_od_dispatch(runtime, command.data.od.request);
+            break;
+#endif /* defined(PKG_LELY_USING_LOCAL_OD) */
+#if defined(PKG_LELY_USING_MASTER_PDO_TX)
+        case LELY_RTT_MASTER_COMMAND_PDO_TX:
+            lely_rtt_master_pdo_dispatch(runtime, command.data.pdo.request);
+            break;
+#endif /* defined(PKG_LELY_USING_MASTER_PDO_TX) */
+#if defined(PKG_LELY_USING_MASTER_EMCY)
+        case LELY_RTT_MASTER_COMMAND_EMCY:
+            lely_rtt_master_emcy_dispatch(runtime, command.data.emcy.request);
+            break;
+#endif /* defined(PKG_LELY_USING_MASTER_EMCY) */
+#if defined(PKG_LELY_USING_MASTER_TIME)
+        case LELY_RTT_MASTER_COMMAND_TIME:
+            lely_rtt_master_time_dispatch(runtime, command.data.time.request);
+            break;
+#endif /* defined(PKG_LELY_USING_MASTER_TIME) */
         default:
             LELY_RTT_LOG_W("invalid Master command type: %u",
                     (unsigned int)command.type);
@@ -279,12 +400,47 @@ lely_rtt_master_command_fini(struct lely_rtt_runtime *runtime)
             if (received != RT_EOK
                     && (rt_size_t)received != sizeof(command))
                 continue;
+
+            switch ((enum lely_rtt_master_command_type)command.type) {
 #if defined(PKG_LELY_USING_MASTER_SDO)
-            if (command.type == LELY_RTT_MASTER_COMMAND_SDO)
+            case LELY_RTT_MASTER_COMMAND_SDO:
                 lely_rtt_master_sdo_cancel_queued(command.data.sdo.request);
+                break;
 #endif /* defined(PKG_LELY_USING_MASTER_SDO) */
+#if defined(PKG_LELY_USING_MASTER_NMT_CFG)
+            case LELY_RTT_MASTER_COMMAND_NMT_CFG:
+                lely_rtt_master_cfg_cancel_queued(command.data.cfg.request);
+                break;
+#endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
+#if defined(PKG_LELY_USING_LOCAL_OD)
+            case LELY_RTT_MASTER_COMMAND_LOCAL_OD:
+                lely_rtt_local_od_cancel_queued(command.data.od.request);
+                break;
+#endif /* defined(PKG_LELY_USING_LOCAL_OD) */
+#if defined(PKG_LELY_USING_MASTER_PDO_TX)
+            case LELY_RTT_MASTER_COMMAND_PDO_TX:
+                lely_rtt_master_pdo_cancel_queued(command.data.pdo.request);
+                break;
+#endif /* defined(PKG_LELY_USING_MASTER_PDO_TX) */
+#if defined(PKG_LELY_USING_MASTER_EMCY)
+            case LELY_RTT_MASTER_COMMAND_EMCY:
+                lely_rtt_master_emcy_cancel_queued(command.data.emcy.request);
+                break;
+#endif /* defined(PKG_LELY_USING_MASTER_EMCY) */
+#if defined(PKG_LELY_USING_MASTER_TIME)
+            case LELY_RTT_MASTER_COMMAND_TIME:
+                lely_rtt_master_time_cancel_queued(command.data.time.request);
+                break;
+#endif /* defined(PKG_LELY_USING_MASTER_TIME) */
+            default:
+                break;
+            }
         }
     }
+
+#if defined(PKG_LELY_USING_MASTER_NMT_CFG)
+    lely_rtt_master_cfg_prepare_nmt_destroy(runtime);
+#endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
 
 #if defined(PKG_LELY_USING_MASTER_SDO)
     lely_rtt_master_sdo_fini(runtime);

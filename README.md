@@ -82,7 +82,6 @@ lely-rtt-vendor/
 ├── tools/                          # Host/vendor 维护工具，不进入目标固件
 │   ├── check_vendor.sh
 │   ├── dcf2c.exe                     # Windows x86-64 Lely DCF-to-C 工具
-│   ├── gen_node1_sdev.sh            # 旧 Node1 静态从站 provenance 工具
 │   ├── setup_dcfgen_windows.ps1     # 可选：按已验证版本准备 Windows dcfgen 环境
 │   ├── requirements-dcfgen-windows.txt # dcfgen Windows 固定依赖版本
 │   ├── gen_sdev.ps1                 # Windows 通用 YAML/DCF -> static sdev C/H 生成器
@@ -174,7 +173,7 @@ py -3 -m venv .venv
 
 通用入口是 `tools\gen_sdev.ps1`。它支持两种模式：`-Yml` 先调用 `dcfgen` 生成 Master DCF，再调用 `dcf2c`；`-Dcf` 直接把任意 DCF 转成 static sdev C。`-Name` 指定 C 符号和默认 `.c/.h` 文件名，`-OutDir` 指定输出目录。
 
-RT-Thread MCU 上的 Master YAML 必须增加 `-CompactMaster -NoStrings`。Lely `dcfgen` 的标准 Master 模板会为多组 Manager 对象生成 `CompactSubObj=127/254`；目标端 `co_dev_create_from_sdev()` 会把这些 compact entry 展开成动态 `co_sub_t`，在小 MCU 上会造成不必要的 heap 压力。`-CompactMaster` 在 Host 端先调用 `tools\compact_master_dcf.py` 收缩这些范围，`-NoStrings` 再让 `dcf2c` 省略可选对象名称字符串。示例：
+RT-Thread MCU 上的 Master YAML 必须增加 `-CompactMaster -NoStrings`。Lely `dcfgen` 的标准 Master 模板会为多组 Manager 对象生成 `CompactSubObj=127/254`，并把 `0x1F22:<node>` concise DCF 表示成 `UploadFile=nodeN.bin`。目标端 `co_dev_create_from_sdev()` 会把 compact entry 展开成动态 `co_sub_t`，而本工程又使用 `LELY_NO_CO_OBJ_FILE=1`，因此 MCU 既不应保留无用的大数组，也不能依赖运行时打开 `nodeN.bin`。`-CompactMaster` 在 Host 端调用 `tools\compact_master_dcf.py` 收缩数组，并把 `0x1F22` 文件内容物化成 inline DOMAIN `ParameterValue`；`-NoStrings` 再让 `dcf2c` 省略可选对象名称字符串。示例：
 
 ```powershell
 # YAML -> DCF + C + H
@@ -194,7 +193,7 @@ RT-Thread MCU 上的 Master YAML 必须增加 `-CompactMaster -NoStrings`。Lely
     -OutDir .\generated\node1
 ```
 
-Master+Node1 不再使用专用包装器，统一直接调用 `tools\gen_sdev.ps1`。刷新仓库内 MCU 示例时必须显式传入 `-CompactMaster -NoStrings -NoHeader -MetaFile master_sdev.meta`，并继续使用 8-entry 的 `0x1003` error history 上限和 256 个估算 sub-object 的安全门槛。这样 `master.dcf`、`master_sdev.c` 和 `master_sdev.meta` 都由同一个通用入口维护，而 `master_sdev.h` 仍保留为项目维护的声明头。不要把未经裁剪的 `dcfgen master.dcf` 直接交给 `dcf2c`。`dcfgen --help` 可能打印 `pkg_resources is deprecated` 警告，只要后续命令继续正常执行就不是失败。完整命令和参数见 [DCF、CANopenEditor 与 Lely dcf2c 使用指南](docs/DCF_DCF2C_CANOPENEDITOR.md)。
+Master+Node1 不再使用专用包装器，统一直接调用 `tools\gen_sdev.ps1`。刷新仓库内 MCU 示例时必须显式传入 `-CompactMaster -NoStrings -NoHeader -MetaFile master_sdev.meta`，并继续使用 8-entry 的 `0x1003` error history 上限和 256 个估算 sub-object 的安全门槛。这样 `master.dcf`、`master_sdev.c` 和 `master_sdev.meta` 都由同一个通用入口维护，而 `master_sdev.h` 仍保留为项目维护的声明头。`-CompactMaster` 输出还会拒绝任何残留的 `CO_OBJ_FLAGS_UPLOAD_FILE/CO_OBJ_FLAGS_DOWNLOAD_FILE`，防止把文件名误编译进 `LELY_NO_CO_OBJ_FILE=1` 的 MCU 固件。不要把未经裁剪的 `dcfgen master.dcf` 直接交给 `dcf2c`。`dcfgen --help` 可能打印 `pkg_resources is deprecated` 警告，只要后续命令继续正常执行就不是失败。完整命令和参数见 [DCF、CANopenEditor 与 Lely dcf2c 使用指南](docs/DCF_DCF2C_CANOPENEDITOR.md)。
 
 默认 auto-init Master 可通过 `lely_rtt_runtime_get_default()` 获取只读 ownership 的 runtime handle。应用线程只读取 owner 发布的 `lely_rtt_runtime_get_local_nmt_state()`、`lely_rtt_runtime_get_remote_nmt_state()` 和 `lely_rtt_runtime_get_remote_boot_status()` snapshot，不直接进入 Lely。
 

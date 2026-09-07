@@ -245,6 +245,82 @@ config PKG_LELY_USING_MASTER_SDO
         Protocol timeout, abort code, completion and shutdown cancellation are
         preserved.
 
+config PKG_LELY_USING_MASTER_NMT_CFG
+    bool "Enable manual Master NMT configuration requests"
+    default n
+    depends on PKG_LELY_USING_MASTER_COMMAND
+    depends on PKG_LELY_USING_CO_NMT_CFG
+    help
+        Expose Lely co_nmt_cfg_req() through the RT-Thread owner queue. The
+        caller waits for a terminal result while all Lely NMT/CSDO objects
+        remain owner-thread-only. Manual configuration arbitrates the CiA 301
+        predefined SDO channel with application SDO transactions. A useful
+        request requires embedded 0x1F22 concise DCF data or an
+        owner-installed Lely cfg_ind callback. The 0x1F8A restore/reset path is
+        intentionally rejected because it conflicts with the current Master's
+        Boot-up/NMT-boot ownership. The checked-in Master example has no
+        supported configuration work, so the bridge fails closed with
+        -RT_ENOSYS instead of reporting a no-op configuration as success.
+
+config PKG_LELY_USING_LOCAL_OD
+    bool "Enable owner-safe local application OD access"
+    default n
+    depends on PKG_LELY_USING_MASTER_COMMAND
+    help
+        Allow application/MSH threads to synchronously read or write only the
+        manufacturer-specific local OD range 0x2000..0x5FFF through the owner
+        queue. Existing Lely download indications are chained, so Server-SDO
+        and RPDO writes remain intact and publish a metadata change snapshot
+        that application threads can observe without touching co_dev directly.
+
+config PKG_LELY_USING_MASTER_PDO_TX
+    bool "Enable event-driven Master TPDO trigger bridge"
+    default n
+    depends on PKG_LELY_USING_MASTER_COMMAND
+    depends on PKG_LELY_USING_LOCAL_OD
+    depends on PKG_LELY_USING_CO_TPDO
+    help
+        Allow application/MSH threads to trigger an already configured static
+        event-driven Master TPDO through the owner queue. Applications update
+        mapped 0x2000..0x5FFF values with the local OD bridge first, then issue
+        the TPDO event. Dynamic PDO remapping and synchronous TPDO control are
+        intentionally outside this B5.2 bridge.
+
+config PKG_LELY_USING_MASTER_EMCY
+    bool "Enable CANopen EMCY application bridge"
+    default n
+    depends on PKG_LELY_USING_MASTER_COMMAND
+    depends on PKG_LELY_USING_CO_EMCY
+    help
+        Retain a bounded history of remote EMCY indications for application/MSH
+        diagnostics and expose owner-safe local EMCY push/pop/clear operations.
+        The bridge is rebound when Lely recreates the EMCY service after local
+        NMT STOP/reset transitions.
+
+config PKG_LELY_MASTER_EMCY_HISTORY_DEPTH
+    int "Remote EMCY history depth"
+    depends on PKG_LELY_USING_MASTER_EMCY
+    range 1 32
+    default 8
+    help
+        Number of received remote EMCY events retained per runtime. Events are
+        stored in a fixed-size ring with atomic publication; no heap allocation
+        is performed by the history path.
+
+config PKG_LELY_USING_MASTER_TIME
+    bool "Enable CANopen TIME application bridge"
+    default n
+    depends on PKG_LELY_USING_MASTER_COMMAND
+    depends on PKG_LELY_USING_CO_TIME
+    help
+        Publish received CANopen TIME values through stable owner-published
+        snapshots and allow explicit application-triggered absolute TIME
+        transmission. Snapshot readers use atomic sequence validation and may
+        briefly sleep and retry when racing owner publication so the owner can
+        complete the update. Periodic production is intentionally not started
+        because the RT port clock is monotonic uptime, not a configured wall
+        clock.
+
 config PKG_LELY_USING_MSH
     bool "Enable CANopen Master MSH commands"
     default n
@@ -256,8 +332,9 @@ config PKG_LELY_USING_MSH
     help
         Export one MSH root command named 'co' for the default auto-init Master.
         status/node/boot read existing snapshots and nmt posts owner commands.
-        When PKG_LELY_USING_MASTER_SDO is also enabled, the same root command
-        exposes scalar SDO read/write diagnostics.
+        Enabled Master SDO, NMT configuration, local OD, TPDO, EMCY and TIME
+        bridges add their corresponding diagnostic/control subcommands under
+        the same root.
 
 endmenu
 
@@ -289,6 +366,7 @@ config PKG_LELY_USING_CO_NMT_CFG
     bool "NMT configuration service"
     default y
     depends on PKG_LELY_USING_CO_MASTER
+    depends on PKG_LELY_USING_CO_CSDO
 
 config PKG_LELY_USING_CO_NODE_GUARDING
     bool "Node guarding"

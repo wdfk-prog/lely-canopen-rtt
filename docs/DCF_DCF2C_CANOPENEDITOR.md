@@ -64,8 +64,8 @@ dcf2c [--no-strings] [-o <file> | --output=<file>] <filename> <variable_name>
 本项目实际使用：
 
 ```sh
-dcf2c examples/node1/node1.dcf node1_sdev \
-    -o examples/node1/node1_sdev.c
+dcf2c -o examples/node1/node1_sdev.c \
+    examples/node1/node1.dcf node1_sdev
 ```
 
 其中：
@@ -255,7 +255,7 @@ tools\gen_sdev.ps1
 - `-OutDir`：输出目录，不存在时自动创建；
 - `-DcfFileName`：YAML 模式下保存生成 DCF 的文件名；省略时默认为 `<Name>.dcf`；
 - `-RemotePdo`：向 `dcfgen` 传递 `-r`；
-- `-CompactMaster`：对 `dcfgen` 的 Master DCF 做 MCU 内存裁剪；Master target 推荐始终启用；
+- `-CompactMaster`：对 `dcfgen` 的 Master DCF 做 MCU 裁剪，把 `0x1F22` concise DCF 文件引用物化成 inline DOMAIN 数据，并把 `master.bin` 中的静态 Master 初始化写入（例如 `0x1F87/0x1F88`）物化进 DCF；Master target 推荐始终启用；
 - `-ErrorHistoryDepth`：`0x1003` error history 保留深度，默认 `8`；
 - `-MaxMasterSubObjects`：裁剪后估算 sub-object 总数上限，默认 `256`；超过时停止生成，避免再次把明显过大的 OD 带到 MCU；
 - `-NoStrings`：向 `dcf2c` 传递 `--no-strings`，不把可选对象/子对象名称复制到目标运行时 heap；
@@ -272,11 +272,11 @@ generated\master_node1\master_sdev.h
 generated\master_node1\master_sdev.meta
 ```
 
-`dcfgen` 本身固定生成名为 `master.dcf` 的完整 Master DCF。通用脚本先在 staging 目录接收该文件；启用 `-CompactMaster` 时，随后调用 `tools\compact_master_dcf.py` 把 `CompactSubObj` 的大范围收缩到当前网络实际需要的范围，再把裁剪结果按 `-DcfFileName` 发布到目标目录。原始完整 DCF 只存在于 staging 目录，成功/失败后都会清理。脚本在 staging 中生成一份临时 YAML，把其中每个 `dcf:` 相对路径先按所选 YAML 所在目录解析为绝对路径，再交给 `dcfgen`。因此类似 `../node1/node1.dcf` 的输入不会依赖用户启动 PowerShell 或 Python 子进程的当前工作目录；仓库内原始 YAML 不会被改写。
+`dcfgen` 本身固定生成名为 `master.dcf` 的完整 Master DCF，并在需要时额外生成 `master.bin` 与 `nodeN.bin`。通用脚本先在 staging 目录接收这些文件；启用 `-CompactMaster` 时，随后调用 `tools\compact_master_dcf.py` 把 `CompactSubObj` 的大范围收缩到当前网络实际需要的范围，把 `0x1F22:<node>` 的 `UploadFile=nodeN.bin` 读取并验证后改写成 DOMAIN `ParameterValue=<hex>`，并把 `master.bin` 中 `0x1018:04/0x1F55/0x1F87/0x1F88` 的静态初始化写入物化进 DCF。显式的 `0x1F22` Node-ID 子项也只保留到 `0x1F81` 中最高配置的远端 Node-ID。随后 `dcf2c` 生成静态 `co_sdev`；由于项目内置 Windows `dcf2c.exe` 可能把 inline DOMAIN `ParameterValue` 输出成 `.dom = NULL`，脚本再调用 `tools\materialize_sdev_domains.py` 按 compact DCF 校验/补齐 `CO_DOMAIN_C(...)` 与 `CO_OBJ_FLAGS_PARAMETER_VALUE`。这样最终 C 不依赖文件后端，满足 MCU 的 `LELY_NO_CO_OBJ_FILE=1`。原始完整 DCF、`master.bin` 和 `nodeN.bin` 只存在于 staging 目录，成功/失败后都会清理。脚本在 staging 中生成一份临时 YAML，把其中每个 `dcf:` 相对路径先按所选 YAML 所在目录解析为绝对路径，再交给 `dcfgen`。因此类似 `../node1/node1.dcf` 的输入不会依赖用户启动 PowerShell 或 Python 子进程的当前工作目录；仓库内原始 YAML 不会被改写。
 
-当前裁剪规则只改变 Host 生成 DCF 的 compact 展开规模，不修改 `master.yml` 中的产品策略：Node-ID、heartbeat multiplier、mandatory、自动 NMT Start/Reset Communication 等仍由 YAML 决定。对于 Node-ID 索引的 Manager 对象，裁剪器保留到当前 `0x1F81` 中最高配置的远端 Node-ID；`0x1003` 单独使用 `-ErrorHistoryDepth`。如果裁剪后估算 sub-object 数仍超过 `-MaxMasterSubObjects`，生成流程 fail closed，不发布新的 `master.dcf/master_sdev.c`。
+当前裁剪规则只改变 Host 生成 DCF 的表示和展开规模，不修改 `master.yml` 中的产品策略：Node-ID、heartbeat multiplier、mandatory、自动 NMT Start/Reset Communication 等仍由 YAML 决定。对于 Node-ID 索引的 Manager 对象以及显式 `0x1F22` 数组，裁剪器保留到当前 `0x1F81` 中最高配置的远端 Node-ID；`0x1003` 单独使用 `-ErrorHistoryDepth`。`0x1F22` 的 concise DCF 二进制结构会在 Host 端校验完整性后内联；缺文件、截断、声明长度不匹配或越出 staging 目录都会直接失败。如果裁剪后估算 sub-object 数仍超过 `-MaxMasterSubObjects`，生成流程 fail closed，不发布新的 `master.dcf/master_sdev.c`。
 
-最终发布同样 fail closed：`gen_sdev.ps1` 会在替换第一个正式产物前先备份本次所有目标文件，随后发布 C/H/DCF/META；任一替换失败都会恢复整组旧文件，避免出现“新 C + 旧 DCF/META”的混合 generation。META 中的输入/DCF/SDEV SHA-256 统一按文本换行归一化为 LF 后计算，并写入 `HASH_MODE=LF_NORMALIZED_TEXT`，所以 Git 的 CRLF/LF 转换不会改变这些 provenance hash。
+最终发布同样 fail closed：`gen_sdev.ps1` 会在替换第一个正式产物前先备份本次所有目标文件，随后发布 C/H/DCF/META；任一替换失败都会恢复整组旧文件，避免出现“新 C + 旧 DCF/META”的混合 generation。对于 `-CompactMaster`，脚本会先把 `master.bin` 初始化值物化进 DCF，再校验/补齐 C 中的 inline DOMAIN，并检查是否残留 `CO_OBJ_FLAGS_UPLOAD_FILE/CO_OBJ_FLAGS_DOWNLOAD_FILE`；任一环节不一致都拒绝发布。META 中的输入/DCF/SDEV SHA-256 统一按文本换行归一化为 LF 后计算，并写入 `HASH_MODE=LF_NORMALIZED_TEXT`，所以 Git 的 CRLF/LF 转换不会改变这些 provenance hash。
 
 **模式 B：已有 DCF -> C/H**
 
@@ -362,12 +362,12 @@ Master + Node1 不再有专用 wrapper。要刷新仓库内示例，直接在项
 
 这条命令就是 Master + Node1 示例的唯一生成入口：
 
-- `master.dcf`：由 `dcfgen -r` 生成后先经过 MCU-safe 裁剪；
-- `master_sdev.c`：由裁剪后的 DCF 经 `dcf2c --no-strings` 生成；
+- `master.dcf`：由 `dcfgen -r` 生成后先经过 MCU-safe 裁剪，并物化 `nodeN.bin/master.bin` 的静态数据；
+- `master_sdev.c`：由裁剪后的 DCF 经 `dcf2c --no-strings` 生成，再按 compact DCF 校验/补齐 fileless DOMAIN；
 - `master_sdev.meta`：由通用脚本记录生成输入/输出 hash 和关键选项；hash 使用 `HASH_MODE=LF_NORMALIZED_TEXT`，因此 CRLF/LF checkout 不会改变 provenance；
 - `master_sdev.h`：因为指定 `-NoHeader`，继续使用仓库内项目维护版本，不被覆盖。
 
-正常输出中必须先看到 `Master DCF footprint estimate:`，再看到 `Generated C/DCF/META`。没有 footprint 行时不要继续拿生成物做 MCU build。
+正常输出中必须先看到 `0x1F87:01`/`0x1F88:01` 的 `materialized from master.bin`、`0x1F22:01: embedded node1.bin (...)`、`0x1F22:01: materialized/verified static DOMAIN (...)` 和 `Master DCF footprint estimate:`，再看到 `Generated C/DCF/META`。任一关键 materialize/embed/footprint 行缺失时不要继续拿生成物做 MCU build。
 
 #### 第 6 步：确认 Master + Node1 示例结果
 
@@ -376,6 +376,10 @@ Get-Item .\examples\master_node1\master.dcf
 Get-Item .\examples\master_node1\master_sdev.c
 Get-Content .\examples\master_node1\master_sdev.meta
 Select-String -Path .\examples\master_node1\master_sdev.c -Pattern "const struct co_sdev master_sdev"
+Select-String -Path .\examples\master_node1\master.dcf -Pattern `
+    "SubNumber=2", "ParameterValue=01000000002000040000005A5AA5A5", "UploadFile="
+Select-String -Path .\examples\master_node1\master_sdev.c -Pattern `
+    "CO_DOMAIN_C", "CO_OBJ_FLAGS_UPLOAD_FILE", "node1.bin"
 ```
 
 如果项目本身在 Git 仓库中，再检查生成 diff：
@@ -492,19 +496,35 @@ dcf2c examples/node1/node1.dcf node1_sdev \
     -o examples/node1/node1_sdev.c
 ```
 
-本仓库已经封装成：
+本仓库不再保留 Node1 专用 shell wrapper，所有 Host 生成统一走通用的
+`tools\gen_sdev.ps1`。**从仓库根目录执行**：
 
-```sh
-./tools/gen_node1_sdev.sh
+```powershell
+.\tools\gen_sdev.ps1 `
+    -Dcf .\examples\node1\node1.dcf `
+    -Name node1_sdev `
+    -OutDir .\examples\node1 `
+    -NoHeader `
+    -MetaFile node1_sdev.meta
 ```
 
-如果 `dcf2c` 不在 `PATH`：
+如果只需要 DCF -> `.c`，可以绕过通用脚本直接执行 Lely `dcf2c`。项目自带 Windows x86-64 工具：
 
-```sh
-DCF2C=/absolute/path/to/dcf2c ./tools/gen_node1_sdev.sh
+```powershell
+.\tools\dcf2c.exe `
+    -o .\examples\node1\node1_sdev.c `
+    .\examples\node1\node1.dcf `
+    node1_sdev
 ```
 
-脚本先写临时文件，`dcf2c` 成功后再替换正式 `node1_sdev.c`，避免生成失败把已有可用文件截断。
+Linux/macOS 中 `dcf2c` 已位于 `PATH` 时，对应完整命令是：
+
+```sh
+dcf2c -o examples/node1/node1_sdev.c examples/node1/node1.dcf node1_sdev
+```
+
+`dcf2c` 的位置参数格式是 `filename <variable name>`；上例中的 `node1_sdev` 就是生成 C 中的
+`const struct co_sdev node1_sdev` 符号。`-o` 指定输出文件；若省略 `-o`，C 源码写到标准输出。
 
 ### 4.2 `.h` 是项目自己提供的薄声明头
 
@@ -704,13 +724,12 @@ CANopenEditor 中厂商自定义对象放在 `0x2000~0x5FFF`。
 本示例使用：
 
 ```text
-0x2000:00  UNSIGNED32  rw  SDO smoke value (future RPDO candidate)
+0x2000:00  UNSIGNED32  rw  SDO/RPDO smoke value
 0x2001:00  UNSIGNED32  rw  TPDO test value
 ```
 
-`0x2001:00` 允许 PDO mapping，并被 TPDO1 映射。`0x2000:00` 虽然同样声明 `PDOMapping=1`，
-但当前 Node1 DCF 没有 `0x1400/0x1600` RPDO communication/mapping 对象，所以 B4.2 只把它当作 SDO
-读写 smoke 对象；RPDO 要在后续阶段显式增加通道和 mapping 后才能验证。
+`0x2001:00` 被 TPDO1 (`0x1800/0x1A00`) 映射；`0x2000:00` 被 RPDO1
+(`0x1400/0x1600`) 映射。当前双向 PDO smoke 通道因此已经在静态 DCF 中闭合。
 
 ### 7.7 导出 DCF
 
@@ -778,10 +797,15 @@ CANopenEditor -> remote .dcf -> dcfgen master.dcf -> Lely dcf2c -> master_sdev.c
 | --- | --- | --- |
 | `0x1000` | `UNSIGNED32`, `ro`, default `0` | Device type |
 | `0x1001` | `UNSIGNED8`, `ro`, default `0` | Error register |
+| `0x1014` | `0x081` | EMCY COB-ID |
 | `0x1017` | `UNSIGNED16`, `rw`, `1000` | Heartbeat producer |
 | `0x1018` | vendor/product/revision/serial | Identity |
 | `0x1200:01` | `0x601` | Client → Node1 SSDO |
 | `0x1200:02` | `0x581` | Node1 SSDO → Client |
+| `0x1400:01` | `0x201` | RPDO1 COB-ID |
+| `0x1400:02` | `255` | Event-driven RPDO |
+| `0x1600:00` | `1` | 1 mapped RPDO object |
+| `0x1600:01` | `0x20000020` | map `0x2000:00`, 32 bit |
 | `0x1800:01` | `0x181` | TPDO1 COB-ID |
 | `0x1800:02` | `255` | Event-driven TPDO |
 | `0x1A00:00` | `1` | 1 mapped object |
@@ -792,7 +816,7 @@ CANopenEditor -> remote .dcf -> dcfgen master.dcf -> Lely dcf2c -> master_sdev.c
 
 | Index | 类型 | Access | PDO mapping | 用途 |
 | --- | --- | --- | --- | --- |
-| `0x2000:00` | `UNSIGNED32` | `rw` | yes | 当前用于 SDO smoke；可作为后续 RPDO 候选 |
+| `0x2000:00` | `UNSIGNED32` | `rw` | yes | SDO/RPDO smoke value |
 | `0x2001:00` | `UNSIGNED32` | `rw` | yes | TPDO event smoke value |
 
 配置完后导出为：
@@ -801,10 +825,21 @@ CANopenEditor -> remote .dcf -> dcfgen master.dcf -> Lely dcf2c -> master_sdev.c
 examples/node1/node1.dcf
 ```
 
-再执行：
+再从仓库根目录执行：
 
-```sh
-./tools/gen_node1_sdev.sh
+```powershell
+.\tools\gen_sdev.ps1 `
+    -Dcf .\examples\node1\node1.dcf `
+    -Name node1_sdev `
+    -OutDir .\examples\node1 `
+    -NoHeader `
+    -MetaFile node1_sdev.meta
+```
+
+如果只想直接导出 C：
+
+```powershell
+.\tools\dcf2c.exe -o .\examples\node1\node1_sdev.c .\examples\node1\node1.dcf node1_sdev
 ```
 
 ## 10. `examples/node1/node1.dcf` 到底从哪里来的
@@ -862,31 +897,35 @@ Node1 所需的 NMT、heartbeat、SSDO、TPDO、Identity 等对象语义按 CANo
 - CiA 301 负责 CANopen 通信对象和协议语义；
 - EDS/DCF 的文件格式本身属于 CiA 306-1。
 
-### 10.3 本项目 B4 测试需求
+### 10.3 本项目 B4/B5/B6 测试需求
 
 为了验证当前 port，不是做通用产品 DCF，因此又加入了本项目专用对象：
 
 ```text
+0x1014          EMCY producer
 0x1200          SSDO server
+0x1400/0x1600  RPDO1
 0x1800/0x1A00  TPDO1
-0x2000          SDO smoke value (future RPDO candidate)
+0x2000          SDO/RPDO smoke value
 0x2001          TPDO smoke value
 ```
 
 并把 Node-ID 固定为 `1`，因此默认预定义连接得到：
 
 ```text
+EMCY      = 0x081
 Heartbeat = 0x701
 SSDO RX   = 0x601
 SSDO TX   = 0x581
+RPDO1     = 0x201
 TPDO1     = 0x181
 ```
 
 所以更准确的 provenance 描述是：
 
-> `node1.dcf` 是本项目 B4 阶段手工建立的、面向 Node-ID 1 的最小从站测试 DCF；
+> `node1.dcf` 是本项目 B4 阶段手工建立、并在 B5/B6 扩展的 Node-ID 1 最小从站测试 DCF；
 > 文件结构和基础对象参考 Lely upstream `test/co-nmt-slave.dcf`，协议对象按 CiA 301 语义整理，
-> SSDO/TPDO/0x2000/0x2001 则由本项目 smoke-test 需求定义。
+> EMCY/SSDO/RPDO/TPDO/0x2000/0x2001 则由本项目 smoke-test 需求定义。
 
 ## 11. 生成后的验证建议
 
@@ -991,7 +1030,8 @@ example currently uses Master Node-ID `127`; `0xFF` is Lely's unconfigured
 sentinel and does not advance through the normal NMT boot-up state.
 
 `dcf2c` generates `master_sdev.c`; `master_sdev.h` is a project-maintained thin
-declaration header. With `dcfgen -r`, Node1 TPDO1 is represented on the Master
-side by the RPDO/mapping and remote-PDO metadata objects. This generation step
-does not by itself prove target compilation, CAN traffic, Boot-up, SDO or PDO
+declaration header. With `dcfgen -r`, both Node1 PDO directions are represented on the Master side:
+Node1 TPDO1 becomes the Master RPDO/mapping path, and Node1 RPDO1 becomes the
+Master TPDO/mapping path with remote-PDO metadata. This generation step does not
+by itself prove target compilation, CAN traffic, Boot-up, SDO, EMCY or PDO
 behavior.
