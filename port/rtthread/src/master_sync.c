@@ -4,6 +4,7 @@
  * Change Logs:
  * Date           Author            Notes
  * 2026-09-06     wdfk-prog         first version
+ * 2026-09-08     wdfk-prog         split SYNC callback bind from service readiness
  */
 
 /**
@@ -116,15 +117,11 @@ lely_rtt_master_sync_bind(struct lely_rtt_runtime *runtime)
     }
 
     /*
-     * Lely can keep the NMT object alive when SYNC service creation fails.
-     * Fail closed here so B9 never reports a usable bridge without the service
-     * that actually delivers the post-PDO SYNC indication.
+     * Claim the NMT-level indication before RESET_NODE. co_nmt_set_sync_ind()
+     * does not depend on an active co_sync; Lely creates that service while
+     * entering Pre-operational. Startup validates service readiness after the
+     * reset transition so creation failures remain fail-closed.
      */
-    if (!co_nmt_get_sync(runtime->master_nmt)) {
-        LELY_RTT_LOG_E("SYNC bridge enabled but SYNC service is unavailable");
-        return -RT_ERROR;
-    }
-
     co_nmt_get_sync_ind(runtime->master_nmt, &ind, &data);
     if (ind && (ind != &lely_rtt_master_sync_ind || data != runtime)) {
         LELY_RTT_LOG_E("NMT SYNC indication is already owned by another callback");

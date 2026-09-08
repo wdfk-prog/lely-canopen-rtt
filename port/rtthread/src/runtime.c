@@ -6,14 +6,9 @@
  * 2026-09-03     wdfk-prog         first version
  * 2026-09-04     wdfk-prog         add owner CANopen node and command ingress
  * 2026-09-05     wdfk-prog         correct B4 role to a local NMT Master
- * 2026-09-05     wdfk-prog         integrate Master command and SDO ingress
- * 2026-09-05     wdfk-prog         integrate configuration, local OD and TIME bridges
  * 2026-09-06     wdfk-prog         retire CFG requests at local NMT barriers
- * 2026-09-06     wdfk-prog         bind B6 EMCY bridge to NMT service lifetime
- * 2026-09-06     wdfk-prog         sync passive timer clock before owner work
- * 2026-09-06     wdfk-prog         preserve synchronous boot completion snapshot
- * 2026-09-06     wdfk-prog         bind and release B8 manual CFG application data
- * 2026-09-06     wdfk-prog         bind B9 post-PDO SYNC indication
+ * 2026-09-07     wdfk-prog         preserve boot completion in remote state snapshot
+ * 2026-09-08     wdfk-prog         ignore stale outer BOOTUP after synchronous boot completion
  */
 
 /**
@@ -80,7 +75,7 @@ lely_rtt_latch_error(struct lely_rtt_runtime *runtime, rt_err_t err)
 /**
  * @brief Pack one remote NMT state snapshot into an atomic word.
  * @param current State currently published to readers.
- * @param last Last state observed from a state indication.
+ * @param last Last confirmed remote NMT state.
  * @param timed_out RT_TRUE while heartbeat monitoring reports a timeout.
  * @return Packed snapshot value.
  */
@@ -207,6 +202,17 @@ lely_rtt_master_state_ind(co_nmt_t *nmt, co_unsigned8_t id,
     if (!id || id > CO_NUM_NODES)
         return;
 
+    /*
+     * co_nmt_on_st() may complete Boot synchronously. BOOTUP cleared the old
+     * result before the chain, so a valid result here is the fresh completion.
+     * boot_ind already finalized the remote snapshot, Boot result and SDO gate;
+     * replaying this outer BOOTUP could reopen a fail-closed SDO state.
+     */
+    if (state == CO_NMT_ST_BOOTUP
+            && ((rt_uint32_t)rt_atomic_load(&runtime->remote_boot_result[id])
+                    & LELY_RTT_REMOTE_BOOT_VALID))
+        return;
+
 #if defined(PKG_LELY_USING_MASTER_SDO)
     /* Apply the post-NMT state gate after Lely default processing. */
     lely_rtt_master_sdo_on_nmt_state(runtime, id, state);
@@ -220,8 +226,8 @@ lely_rtt_master_state_ind(co_nmt_t *nmt, co_unsigned8_t id,
  * @brief Preserve Lely heartbeat handling and publish timeout/recovery state.
  *
  * A timeout makes the public remote-state snapshot temporarily unavailable.
- * The last state observed by lely_rtt_master_state_ind() is retained in the
- * same atomic word and restored when heartbeat monitoring reports recovery.
+ * The last confirmed remote NMT state is retained in the same atomic word and
+ * restored when heartbeat monitoring reports recovery.
  * No Lely object is exposed to the application thread.
  *
  * @param nmt Local Master NMT service.
@@ -263,7 +269,7 @@ lely_rtt_master_hb_ind(co_nmt_t *nmt, co_unsigned8_t id, int state,
 
 #if !LELY_NO_CO_NMT_BOOT
 /**
- * @brief Publish the completed NMT boot result for a remote slave.
+ * @brief Publish completed NMT boot and remote-state snapshots.
  * @param nmt Local Master NMT service.
  * @param id Remote Node-ID.
  * @param st State reported by the completed boot process.
@@ -275,6 +281,7 @@ lely_rtt_master_boot_ind(co_nmt_t *nmt, co_unsigned8_t id,
         co_unsigned8_t st, char es, void *data)
 {
     struct lely_rtt_runtime *runtime = data;
+    const rt_uint8_t state = st & ~CO_NMT_ST_TOGGLE;
     rt_uint32_t result;
 
     (void)nmt;
@@ -282,13 +289,19 @@ lely_rtt_master_boot_ind(co_nmt_t *nmt, co_unsigned8_t id,
         return;
 
 #if defined(PKG_LELY_USING_MASTER_SDO)
-    lely_rtt_master_sdo_on_boot_complete(runtime, id,
-            st & ~CO_NMT_ST_TOGGLE);
+    lely_rtt_master_sdo_on_boot_complete(runtime, id, state);
 #endif /* defined(PKG_LELY_USING_MASTER_SDO) */
 
+    /*
+     * The Boot-up indication precedes Lely's boot procedure. Publish the
+     * completed boot state here so the application snapshot does not remain
+     * at BOOTUP after boot reports PREOP or Operational.
+     */
+    rt_atomic_store(&runtime->remote_nmt_state[id],
+            lely_rtt_remote_state_pack(state, state, RT_FALSE));
     result = LELY_RTT_REMOTE_BOOT_VALID
             | ((rt_uint32_t)(rt_uint8_t)es << LELY_RTT_REMOTE_BOOT_ERROR_SHIFT)
-            | (rt_uint32_t)(st & ~CO_NMT_ST_TOGGLE);
+            | (rt_uint32_t)state;
     rt_atomic_store(&runtime->remote_boot_result[id], (rt_atomic_t)result);
 }
 #endif /* !LELY_NO_CO_NMT_BOOT */
@@ -337,6 +350,7 @@ lely_rtt_master_init(struct lely_rtt_runtime *runtime)
     co_nmt_set_boot_ind(runtime->master_nmt,
             &lely_rtt_master_boot_ind, runtime);
 #endif /* !LELY_NO_CO_NMT_BOOT */
+
 #if defined(PKG_LELY_USING_MASTER_NMT_CFG)
     {
         /* Bind before local reset can launch any Lely configuration activity. */
@@ -350,7 +364,11 @@ lely_rtt_master_init(struct lely_rtt_runtime *runtime)
 #endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
 #if defined(PKG_LELY_USING_MASTER_SYNC_PDO)
     {
-        /* Bind before reset can activate a periodic producer from object 0x1006. */
+        /*
+         * Register at the NMT level before RESET_NODE. Lely creates the active
+         * SYNC service only while entering Pre-operational, so requiring
+         * co_nmt_get_sync() here would reject every normal startup.
+         */
         rt_err_t err = lely_rtt_master_sync_bind(runtime);
 
         if (err != RT_EOK) {
@@ -368,6 +386,17 @@ lely_rtt_master_init(struct lely_rtt_runtime *runtime)
         LELY_RTT_LOG_E("configured local CANopen device is not an NMT Master");
         return -RT_ERROR;
     }
+#if defined(PKG_LELY_USING_MASTER_SYNC_PDO)
+    /*
+     * RESET_NODE runs Lely's local state transition synchronously through
+     * service setup. Validate co_sync here, after pre-reset callback ownership
+     * registration, so creation failure remains a startup error.
+     */
+    if (!co_nmt_get_sync(runtime->master_nmt)) {
+        LELY_RTT_LOG_E("SYNC bridge enabled but SYNC service is unavailable");
+        return -RT_ERROR;
+    }
+#endif /* defined(PKG_LELY_USING_MASTER_SYNC_PDO) */
 
 #if defined(PKG_LELY_USING_LOCAL_OD)
     {
@@ -770,18 +799,28 @@ lely_rtt_owner_entry(void *parameter)
             lely_rtt_can_process_status(runtime);
 
         /*
-         * RX/status injection above only queues Lely executor work. Synchronize
-         * the passive clock after those inputs are queued but before command
-         * dispatch or ev_loop execution. Otherwise a wake after a long idle can
-         * create a relative deadline from stale Lely time while the RT timer
-         * bridge compares it with current uptime, collapsing the timeout.
+         * RX/status injection above only queues Lely executor work. Advance the
+         * passive clock after those inputs are queued so they observe current
+         * time when the executor runs.
          */
         lely_rtt_timer_advance(runtime);
 #if defined(PKG_LELY_USING_MASTER_COMMAND)
         /*
-         * Drain one bounded batch on every owner iteration. COMMAND still gives
-         * immediate wakeup, while unrelated RX/timer/status traffic can no
-         * longer starve a queued command whose wake event was lost.
+         * Consume already queued RX/timer/status work before explicitly
+         * advancing can_net protocol time. Otherwise a response already in the
+         * RT CAN FIFO could be overtaken by its protocol timeout. Refreshing
+         * can_net after this drain also prevents a command issued after a long
+         * idle period from creating a relative deadline from stale time.
+         */
+        lely_rtt_drain_loop(runtime);
+        lely_rtt_timer_sync_can_net(runtime);
+        if (runtime->runtime_error != RT_EOK)
+            break;
+
+        /*
+         * Drain one bounded command batch on every owner iteration. COMMAND
+         * still gives immediate wakeup, while unrelated traffic can no longer
+         * starve an already-enqueued command whose wake event was lost.
          */
         lely_rtt_master_command_dispatch(runtime);
 #endif /* defined(PKG_LELY_USING_MASTER_COMMAND) */

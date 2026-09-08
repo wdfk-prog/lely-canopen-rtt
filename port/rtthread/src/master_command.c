@@ -8,7 +8,7 @@
  * 2026-09-06     wdfk-prog         support rt_mq_recv return semantics
  * 2026-09-06     wdfk-prog         dispatch TPDO and EMCY owner-safe requests
  * 2026-09-06     wdfk-prog         add owner-dispatched application SDO cancellation
- * 2026-09-06     wdfk-prog         dispatch B9 SYNC/PDO control requests
+ * 2026-09-08     wdfk-prog         dispatch B9 SYNC/PDO control requests
  */
 
 /**

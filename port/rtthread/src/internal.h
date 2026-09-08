@@ -12,7 +12,8 @@
  * 2026-09-06     wdfk-prog         add local NMT CFG lifetime barrier hook
  * 2026-09-06     wdfk-prog         add B5.2 TPDO and B6 EMCY owner bridges
  * 2026-09-06     wdfk-prog         add managed manual CFG source state
- * 2026-09-06     wdfk-prog         add B9 SYNC and synchronous PDO owner state
+ * 2026-09-07     wdfk-prog         synchronize passive and CAN network clocks
+ * 2026-09-08     wdfk-prog         add B9 SYNC and synchronous PDO owner state
  */
 
 /**
@@ -614,12 +615,23 @@ void lely_rtt_timer_fini(struct lely_rtt_runtime *runtime);
  * @brief Synchronize the passive Lely timer clock with the current RT tick.
  *
  * Owner work queues external RX/status input first, calls this function, then
- * dispatches commands or drains the Lely executor. This keeps deadlines
- * created by that work on the same time base as the RT one-shot bridge.
+ * drains the Lely executor. This lets already received frames observe current
+ * passive time without advancing CAN protocol timers ahead of those frames.
  *
  * @param runtime Runtime instance; this function is owner-thread-only.
  */
 void lely_rtt_timer_advance(struct lely_rtt_runtime *runtime);
+
+/**
+ * @brief Refresh passive and CAN network time before owner command dispatch.
+ *
+ * Call this only after executor work queued by the current RX/status batch has
+ * been drained. New command-driven relative CANopen deadlines then start from
+ * current protocol time without overtaking an already received CAN frame.
+ *
+ * @param runtime Runtime instance; this function is owner-thread-only.
+ */
+void lely_rtt_timer_sync_can_net(struct lely_rtt_runtime *runtime);
 
 /**
  * @brief Open/configure RT CAN and create the passive Lely user CAN channel.

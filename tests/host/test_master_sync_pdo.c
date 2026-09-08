@@ -3,7 +3,7 @@
  *
  * Change Logs:
  * Date           Author            Notes
- * 2026-09-06     wdfk-prog         first version
+ * 2026-09-08     wdfk-prog         first version
  */
 
 /**
@@ -13,55 +13,93 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
+#define LELY_RTT_INTERNAL_H_
 #define PKG_LELY_USING_MASTER_COMMAND 1
 #define PKG_LELY_USING_MASTER_PDO_TX 1
 #define PKG_LELY_USING_MASTER_SYNC_PDO 1
-#define LELY_RTT_INTERNAL_H_ 1
 
-#define CO_NUM_PDOS 512
-#define CO_PDO_NUM_MAPS 64
-#define CO_PDO_COBID_VALID 0x80000000u
-#define CO_SYNC_COBID_PRODUCER 0x40000000u
-#define CO_DEFTYPE_UNSIGNED8 0x0005u
-#define CO_DEFTYPE_UNSIGNED32 0x0007u
-
+#define RT_NULL NULL
+#define RT_TRUE 1
+#define RT_FALSE 0
 #define RT_EOK 0
 #define RT_ERROR 1
 #define RT_EINVAL 22
 #define RT_EBUSY 16
+#define RT_ENOMEM 12
 #define RT_ENOSYS 38
-#define RT_TRUE 1
-#define RT_FALSE 0
-#define RT_NULL NULL
+#define RT_ETIMEOUT 110
+#define RT_WAITING_NO 0
+#define RT_IPC_FLAG_FIFO 0
+#define RT_EVENT_FLAG_OR (1u << 0)
+#define RT_EVENT_FLAG_CLEAR (1u << 1)
+#define LELY_RTT_EVENT_COMMAND (1u << 6)
+#define LELY_RTT_MASTER_SYNC_DONE (1u << 0)
+#define PKG_LELY_MASTER_COMMAND_QUEUE_DEPTH 8u
 
-#define LELY_RTT_LOG_E(...) ((void)0)
-#define LELY_RTT_LOG_W(...) ((void)0)
-
-#define rt_memset memset
-
-typedef int rt_err_t;
 typedef int rt_bool_t;
+typedef int rt_err_t;
+typedef int32_t rt_atomic_t;
+typedef int32_t rt_int32_t;
+typedef int rt_base_t;
+typedef size_t rt_size_t;
+typedef void *rt_thread_t;
 typedef uint8_t rt_uint8_t;
 typedef uint16_t rt_uint16_t;
 typedef uint32_t rt_uint32_t;
-typedef int32_t rt_atomic_t;
-typedef void *rt_thread_t;
 
 typedef uint8_t co_unsigned8_t;
 typedef uint16_t co_unsigned16_t;
 typedef uint32_t co_unsigned32_t;
 
-typedef struct co_nmt co_nmt_t;
-typedef struct co_dev co_dev_t;
-typedef struct co_sub co_sub_t;
-typedef struct co_sync co_sync_t;
-typedef struct co_rpdo co_rpdo_t;
-typedef struct co_tpdo co_tpdo_t;
+typedef struct fake_dev co_dev_t;
+typedef struct fake_nmt co_nmt_t;
+typedef struct fake_sub co_sub_t;
+typedef struct fake_rpdo co_rpdo_t;
+typedef struct fake_tpdo co_tpdo_t;
+typedef void co_nmt_sync_ind_t(co_nmt_t *, co_unsigned8_t, void *);
 
-typedef void co_nmt_sync_ind_t(co_nmt_t *nmt, co_unsigned8_t counter,
-        void *data);
+#define CO_NUM_NODES 127u
+#define CO_NUM_PDOS 512u
+#define CO_PDO_NUM_MAPS 64u
+#define CO_PDO_COBID_VALID 0x80000000u
+#define CO_SYNC_COBID_PRODUCER 0x40000000u
+#define CO_DEFTYPE_UNSIGNED8 0x0005u
+#define CO_DEFTYPE_UNSIGNED32 0x0007u
+
+#define LELY_RTT_SYNC_ROLE_CONSUMER (1u << 0)
+#define LELY_RTT_SYNC_ROLE_PRODUCER (1u << 1)
+
+enum lely_rtt_pdo_direction {
+    LELY_RTT_PDO_DIRECTION_RPDO = 0,
+    LELY_RTT_PDO_DIRECTION_TPDO,
+};
+
+struct lely_rtt_sync_event {
+    rt_uint32_t sequence;
+    rt_uint32_t period_us;
+    rt_uint8_t counter;
+    rt_uint8_t role;
+};
+
+struct lely_rtt_runtime;
+typedef void lely_rtt_sync_ind_t(struct lely_rtt_runtime *,
+        const struct lely_rtt_sync_event *, void *);
+
+struct rt_event {
+    rt_uint32_t pending;
+    int initialized;
+};
+
+struct lely_rtt_master_sync {
+    struct rt_event event;
+    rt_atomic_t done;
+    rt_atomic_t completion_refs;
+    rt_err_t result;
+    rt_bool_t initialized;
+};
 
 struct co_pdo_comm_par {
     co_unsigned32_t cobid;
@@ -72,103 +110,90 @@ struct co_pdo_map_par {
     co_unsigned8_t n;
 };
 
-struct co_sub {
-    co_unsigned16_t idx;
-    co_unsigned8_t subidx;
+struct fake_sub {
     co_unsigned16_t type;
-    co_unsigned32_t value_u32;
-    co_unsigned8_t value_u8;
-    co_unsigned32_t abort_code;
+    co_unsigned32_t u32;
+    co_unsigned8_t u8;
+    int dn_abort;
     co_rpdo_t *rpdo;
     co_tpdo_t *tpdo;
 };
 
-struct co_dev {
-    struct co_sub sync_cobid;
-    struct co_sub sync_period;
-    struct co_sub rpdo_type;
-    struct co_sub tpdo_type;
+struct fake_dev {
+    struct fake_sub sub_1005;
+    struct fake_sub sub_1006;
+    struct fake_sub rpdo_trans;
+    struct fake_sub tpdo_trans;
+    int has_1005;
+    int has_1006;
+    int has_rpdo;
+    int has_tpdo;
 };
 
-struct co_sync {
-    int active;
-};
-
-struct co_rpdo {
+struct fake_rpdo {
+    int stopped;
+    int stop_calls;
+    int start_calls;
+    int start_failures_remaining;
+    int sync_pending;
+    int pending_frame;
+    struct fake_sub *trans_sub;
     struct co_pdo_comm_par comm;
-    co_dev_t *dev;
-    rt_bool_t stopped;
-    rt_bool_t sync_pending;
-    rt_bool_t pending_frame;
-    unsigned int stop_calls;
-    unsigned int start_calls;
-    unsigned int start_attempts;
-    unsigned int start_failures_remaining;
 };
 
-struct co_tpdo {
+struct fake_tpdo {
+    int stopped;
+    int stop_calls;
+    int start_calls;
+    int start_failures_remaining;
+    int event_timer_active;
+    int event_pending;
+    int sync_count;
+    int event_calls;
+    struct fake_sub *trans_sub;
     struct co_pdo_comm_par comm;
     struct co_pdo_map_par map;
-    co_dev_t *dev;
-    rt_bool_t stopped;
-    rt_bool_t event_timer_active;
-    rt_bool_t event_pending;
-    co_unsigned8_t sync_count;
-    unsigned int stop_calls;
-    unsigned int start_calls;
-    unsigned int start_attempts;
-    unsigned int start_failures_remaining;
-    int event_calls;
-    int event_result;
 };
 
-struct co_nmt {
+struct fake_nmt {
     co_nmt_sync_ind_t *sync_ind;
-    void *sync_ind_data;
-    struct co_sync sync;
-    rt_bool_t sync_available;
-    struct co_rpdo rpdo;
-    struct co_tpdo tpdo;
+    void *sync_data;
+    void *sync_service;
+    struct fake_rpdo *rpdo;
+    struct fake_tpdo *tpdo;
+    int get_sync_calls;
 };
-
-struct lely_rtt_master_sync {
-    rt_bool_t initialized;
-    rt_bool_t completed;
-    rt_err_t result;
-};
-
-typedef struct lely_rtt_runtime lely_rtt_runtime_t;
-
-/** Local PDO direction used by the B9 transmission-type control API. */
-enum lely_rtt_pdo_direction {
-    LELY_RTT_PDO_DIRECTION_RPDO = 0,
-    LELY_RTT_PDO_DIRECTION_TPDO,
-};
-
-#define LELY_RTT_SYNC_ROLE_CONSUMER (1u << 0)
-#define LELY_RTT_SYNC_ROLE_PRODUCER (1u << 1)
-
-struct lely_rtt_sync_event {
-    rt_uint32_t sequence;
-    rt_uint32_t period_us;
-    rt_uint8_t counter;
-    rt_uint8_t role;
-};
-
-typedef void lely_rtt_sync_ind_t(lely_rtt_runtime_t *runtime,
-        const struct lely_rtt_sync_event *event, void *data);
 
 struct lely_rtt_master_pdo_request;
 struct lely_rtt_master_sync_control_request;
 
+enum lely_rtt_nmt_command {
+    LELY_RTT_NMT_COMMAND_START = 0,
+    LELY_RTT_NMT_COMMAND_STOP,
+    LELY_RTT_NMT_COMMAND_PREOP,
+    LELY_RTT_NMT_COMMAND_RESET_NODE,
+    LELY_RTT_NMT_COMMAND_RESET_COMM,
+};
+
+#define CO_NMT_CS_START 0x01u
+#define CO_NMT_CS_STOP 0x02u
+#define CO_NMT_CS_ENTER_PREOP 0x80u
+#define CO_NMT_CS_RESET_NODE 0x81u
+#define CO_NMT_CS_RESET_COMM 0x82u
+
 enum lely_rtt_master_command_type {
-    LELY_RTT_MASTER_COMMAND_PDO_TX = 0,
+    LELY_RTT_MASTER_COMMAND_NMT = 0,
+    LELY_RTT_MASTER_COMMAND_PDO_TX,
     LELY_RTT_MASTER_COMMAND_SYNC,
 };
 
 struct lely_rtt_master_command {
     rt_uint8_t type;
     union {
+        struct {
+            rt_uint8_t node_id;
+            rt_uint8_t command;
+        } nmt;
         struct {
             struct lely_rtt_master_pdo_request *request;
         } pdo;
@@ -178,11 +203,23 @@ struct lely_rtt_master_command {
     } data;
 };
 
+struct fake_mq {
+    struct lely_rtt_master_command items[PKG_LELY_MASTER_COMMAND_QUEUE_DEPTH];
+    rt_size_t head;
+    rt_size_t count;
+};
+
 struct lely_rtt_runtime {
+    struct fake_dev *master_dev;
+    struct fake_nmt *master_nmt;
     rt_thread_t owner_thread;
-    co_dev_t *master_dev;
-    co_nmt_t *master_nmt;
-    rt_bool_t event_initialized;
+    struct fake_mq *command_mq;
+    struct rt_event event;
+    int event_initialized;
+    rt_atomic_t command_refs;
+    rt_atomic_t command_stop_latched;
+    rt_atomic_t command_quiescing;
+    rt_atomic_t local_node_id;
     lely_rtt_sync_ind_t *sync_app_ind;
     void *sync_app_data;
     rt_atomic_t sync_snapshot_seq;
@@ -191,68 +228,30 @@ struct lely_rtt_runtime {
     rt_atomic_t sync_snapshot_role;
 };
 
-static rt_thread_t rt_thread_self(void);
-static rt_atomic_t rt_atomic_load(const rt_atomic_t *value);
-static void rt_atomic_store(rt_atomic_t *value, rt_atomic_t desired);
-static void rt_thread_mdelay(int milliseconds);
+typedef struct lely_rtt_runtime lely_rtt_runtime_t;
 
-void co_nmt_get_sync_ind(co_nmt_t *nmt, co_nmt_sync_ind_t **ind,
-        void **data);
-void co_nmt_set_sync_ind(co_nmt_t *nmt, co_nmt_sync_ind_t *ind, void *data);
-co_sync_t *co_nmt_get_sync(const co_nmt_t *nmt);
-co_rpdo_t *co_nmt_get_rpdo(const co_nmt_t *nmt, co_unsigned16_t num);
-co_tpdo_t *co_nmt_get_tpdo(const co_nmt_t *nmt, co_unsigned16_t num);
-int co_rpdo_start(co_rpdo_t *rpdo);
-void co_rpdo_stop(co_rpdo_t *rpdo);
-int co_rpdo_is_stopped(const co_rpdo_t *rpdo);
-int co_tpdo_start(co_tpdo_t *tpdo);
-void co_tpdo_stop(co_tpdo_t *tpdo);
-int co_tpdo_is_stopped(const co_tpdo_t *tpdo);
-co_sub_t *co_dev_find_sub(co_dev_t *dev, co_unsigned16_t idx,
-        co_unsigned8_t subidx);
-co_unsigned32_t co_dev_get_val_u32(const co_dev_t *dev,
-        co_unsigned16_t idx, co_unsigned8_t subidx);
-co_unsigned32_t co_sub_get_val_u32(const co_sub_t *sub);
-co_unsigned8_t co_sub_get_val_u8(const co_sub_t *sub);
-co_unsigned16_t co_sub_get_type(const co_sub_t *sub);
-size_t co_sub_set_val_u8(co_sub_t *sub, co_unsigned8_t value);
-co_unsigned32_t co_sub_dn_ind_val(co_sub_t *sub, co_unsigned16_t type,
-        const void *value);
-const struct co_pdo_comm_par *co_tpdo_get_comm_par(const co_tpdo_t *tpdo);
-const struct co_pdo_map_par *co_tpdo_get_map_par(const co_tpdo_t *tpdo);
-int co_tpdo_event(co_tpdo_t *tpdo);
+void lely_rtt_master_command_dispatch(struct lely_rtt_runtime *runtime);
+void lely_rtt_master_pdo_dispatch(struct lely_rtt_runtime *runtime,
+        struct lely_rtt_master_pdo_request *request);
+void lely_rtt_master_pdo_cancel_queued(
+        struct lely_rtt_master_pdo_request *request);
+void lely_rtt_master_sync_dispatch(struct lely_rtt_runtime *runtime,
+        struct lely_rtt_master_sync_control_request *request);
+void lely_rtt_master_sync_cancel_queued(
+        struct lely_rtt_master_sync_control_request *request);
 
-rt_err_t lely_rtt_master_sync_init(struct lely_rtt_master_sync *sync,
-        const char *name);
-void lely_rtt_master_sync_complete(struct lely_rtt_master_sync *sync,
-        rt_err_t result);
-rt_err_t lely_rtt_master_sync_wait(struct lely_rtt_master_sync *sync);
-void lely_rtt_master_sync_fini(struct lely_rtt_master_sync *sync);
-rt_err_t lely_rtt_master_command_post(struct lely_rtt_runtime *runtime,
-        const struct lely_rtt_master_command *command);
-
-#include "../../port/rtthread/src/master_sync.c"
-#include "../../port/rtthread/src/master_pdo.c"
-
-struct b9_fixture {
-    struct lely_rtt_runtime runtime;
-    struct co_dev dev;
-    struct co_nmt nmt;
-};
-
-static rt_thread_t current_thread = (rt_thread_t)(uintptr_t)0x2222u;
-static unsigned int delay_calls;
-static unsigned int dn_calls;
-static co_unsigned16_t last_dn_index;
-static co_unsigned8_t last_dn_subindex;
-static rt_bool_t callback_called;
+static rt_thread_t fake_self = (rt_thread_t)(uintptr_t)0x1234u;
+static struct fake_mq fake_queue;
+static struct lely_rtt_runtime *dispatch_runtime;
+static int command_posts;
+static int dispatch_calls;
+static int dn_calls;
+static rt_uint8_t last_command_type;
+static int callback_calls;
 static struct lely_rtt_sync_event callback_event;
 
-static rt_thread_t
-rt_thread_self(void)
-{
-    return current_thread;
-}
+#define LELY_RTT_LOG_E(...) ((void)0)
+#define LELY_RTT_LOG_W(...) ((void)0)
 
 static rt_atomic_t
 rt_atomic_load(const rt_atomic_t *value)
@@ -261,741 +260,1027 @@ rt_atomic_load(const rt_atomic_t *value)
 }
 
 static void
-rt_atomic_store(rt_atomic_t *value, rt_atomic_t desired)
+rt_atomic_store(rt_atomic_t *target, rt_atomic_t value)
 {
-    *value = desired;
+    *target = value;
 }
 
 static void
-rt_thread_mdelay(int milliseconds)
+rt_atomic_add(rt_atomic_t *target, rt_atomic_t value)
 {
-    (void)milliseconds;
-    delay_calls++;
+    *target += value;
 }
 
-void
-co_nmt_get_sync_ind(co_nmt_t *nmt, co_nmt_sync_ind_t **ind, void **data)
+static void
+rt_atomic_sub(rt_atomic_t *target, rt_atomic_t value)
+{
+    *target -= value;
+}
+
+static rt_thread_t
+rt_thread_self(void)
+{
+    return fake_self;
+}
+
+static void
+rt_thread_mdelay(int ms)
+{
+    (void)ms;
+}
+
+static rt_err_t
+rt_event_init(struct rt_event *event, const char *name, rt_uint8_t flag)
+{
+    (void)name;
+    (void)flag;
+    if (!event)
+        return -RT_EINVAL;
+    event->pending = 0;
+    event->initialized = 1;
+    return RT_EOK;
+}
+
+static rt_err_t
+rt_event_send(struct rt_event *event, rt_uint32_t set)
+{
+    if (!event)
+        return -RT_EINVAL;
+    event->pending |= set;
+    return RT_EOK;
+}
+
+static rt_err_t
+rt_event_recv(struct rt_event *event, rt_uint32_t set, rt_uint8_t option,
+        rt_int32_t timeout, rt_uint32_t *received)
+{
+    rt_uint32_t matched;
+
+    (void)timeout;
+    if (!event || !received)
+        return -RT_EINVAL;
+
+    /*
+     * Pump the real Master command dispatcher at the point where the caller
+     * would block. This models the separate owner thread deterministically, so
+     * public B9 APIs still traverse command post -> queue -> dispatch -> wait.
+     */
+    if (!(event->pending & set) && dispatch_runtime
+            && dispatch_runtime->command_mq
+            && dispatch_runtime->command_mq->count) {
+        dispatch_calls++;
+        lely_rtt_master_command_dispatch(dispatch_runtime);
+    }
+
+    matched = event->pending & set;
+    if (!matched) {
+        fprintf(stderr, "host command dispatch did not complete the synchronous request\n");
+        exit(2);
+    }
+
+    *received = matched;
+    if (option & RT_EVENT_FLAG_CLEAR)
+        event->pending &= ~matched;
+    return RT_EOK;
+}
+
+static rt_err_t
+rt_event_detach(struct rt_event *event)
+{
+    if (!event)
+        return -RT_EINVAL;
+    event->initialized = 0;
+    event->pending = 0;
+    return RT_EOK;
+}
+
+static struct fake_mq *
+rt_mq_create(const char *name, rt_size_t msg_size, rt_size_t max_msgs,
+        rt_uint8_t flag)
+{
+    struct fake_mq *mq;
+
+    (void)name;
+    (void)flag;
+    if (msg_size != sizeof(struct lely_rtt_master_command)
+            || !max_msgs || max_msgs > PKG_LELY_MASTER_COMMAND_QUEUE_DEPTH)
+        return NULL;
+    mq = calloc(1, sizeof(*mq));
+    return mq;
+}
+
+static rt_err_t
+rt_mq_send(struct fake_mq *mq, const void *message, rt_size_t size)
+{
+    rt_size_t tail;
+
+    if (!mq || !message || size != sizeof(struct lely_rtt_master_command))
+        return -RT_EINVAL;
+    if (mq->count >= PKG_LELY_MASTER_COMMAND_QUEUE_DEPTH)
+        return -RT_EBUSY;
+
+    tail = (mq->head + mq->count) % PKG_LELY_MASTER_COMMAND_QUEUE_DEPTH;
+    memcpy(&mq->items[tail], message, size);
+    mq->count++;
+    command_posts++;
+    last_command_type = ((const struct lely_rtt_master_command *)message)->type;
+    return RT_EOK;
+}
+
+static rt_base_t
+rt_mq_recv(struct fake_mq *mq, void *message, rt_size_t size,
+        rt_int32_t timeout)
+{
+    (void)timeout;
+    if (!mq || !message || size != sizeof(struct lely_rtt_master_command))
+        return -RT_EINVAL;
+    if (!mq->count)
+        return -RT_ETIMEOUT;
+
+    memcpy(message, &mq->items[mq->head], size);
+    mq->head = (mq->head + 1u) % PKG_LELY_MASTER_COMMAND_QUEUE_DEPTH;
+    mq->count--;
+    return RT_EOK;
+}
+
+static rt_err_t
+rt_mq_delete(struct fake_mq *mq)
+{
+    free(mq);
+    return RT_EOK;
+}
+
+static rt_int32_t
+lely_rtt_timeout_ticks(rt_uint32_t timeout_ms)
+{
+    (void)timeout_ms;
+    return 1;
+}
+
+static int
+co_nmt_cs_req(co_nmt_t *nmt, co_unsigned8_t cs, co_unsigned8_t id)
+{
+    (void)nmt;
+    (void)cs;
+    (void)id;
+    return 0;
+}
+
+#define rt_memset memset
+
+static co_sub_t *
+co_dev_find_sub(co_dev_t *dev, co_unsigned16_t idx, co_unsigned8_t subidx)
+{
+    if (!dev || (subidx != 0x00u && subidx != 0x02u))
+        return NULL;
+    if (idx == 0x1005u && subidx == 0x00u)
+        return dev->has_1005 ? &dev->sub_1005 : NULL;
+    if (idx == 0x1006u && subidx == 0x00u)
+        return dev->has_1006 ? &dev->sub_1006 : NULL;
+    if (idx == 0x1400u && subidx == 0x02u)
+        return dev->has_rpdo ? &dev->rpdo_trans : NULL;
+    if (idx == 0x1800u && subidx == 0x02u)
+        return dev->has_tpdo ? &dev->tpdo_trans : NULL;
+    return NULL;
+}
+
+static co_unsigned32_t
+co_dev_get_val_u32(co_dev_t *dev, co_unsigned16_t idx, co_unsigned8_t subidx)
+{
+    co_sub_t *sub = co_dev_find_sub(dev, idx, subidx);
+    return sub ? sub->u32 : 0;
+}
+
+static co_unsigned16_t
+co_sub_get_type(const co_sub_t *sub)
+{
+    return sub->type;
+}
+
+static co_unsigned32_t
+co_sub_get_val_u32(const co_sub_t *sub)
+{
+    return sub->u32;
+}
+
+static co_unsigned8_t
+co_sub_get_val_u8(const co_sub_t *sub)
+{
+    return sub->u8;
+}
+
+static co_unsigned8_t *
+co_sub_set_val_u8(co_sub_t *sub, co_unsigned8_t value)
+{
+    if (!sub)
+        return NULL;
+    sub->u8 = value;
+    return &sub->u8;
+}
+
+static co_unsigned32_t
+co_sub_dn_ind_val(co_sub_t *sub, co_unsigned16_t type, const void *value)
+{
+    if (!sub || type != sub->type)
+        return 0x06070010u;
+    dn_calls++;
+    if (sub->dn_abort)
+        return (co_unsigned32_t)sub->dn_abort;
+    if (type == CO_DEFTYPE_UNSIGNED32)
+        sub->u32 = *(const co_unsigned32_t *)value;
+    else if (type == CO_DEFTYPE_UNSIGNED8) {
+        sub->u8 = *(const co_unsigned8_t *)value;
+        /* Mirror Lely's active PDO cache update performed by the OD indication. */
+        if (sub->rpdo)
+            sub->rpdo->comm.trans = sub->u8;
+        if (sub->tpdo)
+            sub->tpdo->comm.trans = sub->u8;
+    }
+    return 0;
+}
+
+static void
+co_nmt_get_sync_ind(const co_nmt_t *nmt, co_nmt_sync_ind_t **ind, void **data)
 {
     if (ind)
         *ind = nmt->sync_ind;
     if (data)
-        *data = nmt->sync_ind_data;
-}
-
-void
-co_nmt_set_sync_ind(co_nmt_t *nmt, co_nmt_sync_ind_t *ind, void *data)
-{
-    nmt->sync_ind = ind;
-    nmt->sync_ind_data = data;
-}
-
-co_sync_t *
-co_nmt_get_sync(const co_nmt_t *nmt)
-{
-    return nmt && nmt->sync_available ? (co_sync_t *)&nmt->sync : RT_NULL;
-}
-
-co_rpdo_t *
-co_nmt_get_rpdo(const co_nmt_t *nmt, co_unsigned16_t num)
-{
-    return nmt && num == 1 ? (co_rpdo_t *)&nmt->rpdo : RT_NULL;
-}
-
-co_tpdo_t *
-co_nmt_get_tpdo(const co_nmt_t *nmt, co_unsigned16_t num)
-{
-    return nmt && num == 1 ? (co_tpdo_t *)&nmt->tpdo : RT_NULL;
-}
-
-int
-co_rpdo_start(co_rpdo_t *rpdo)
-{
-    if (!rpdo)
-        return -1;
-    if (!rpdo->stopped)
-        return 0;
-
-    rpdo->start_attempts++;
-    if (rpdo->start_failures_remaining) {
-        rpdo->start_failures_remaining--;
-        return -1;
-    }
-
-    rpdo->comm.trans = rpdo->dev->rpdo_type.value_u8;
-    rpdo->sync_pending = RT_FALSE;
-    rpdo->pending_frame = RT_FALSE;
-    rpdo->stopped = RT_FALSE;
-    rpdo->start_calls++;
-    return 0;
-}
-
-void
-co_rpdo_stop(co_rpdo_t *rpdo)
-{
-    if (!rpdo || rpdo->stopped)
-        return;
-
-    rpdo->stopped = RT_TRUE;
-    rpdo->stop_calls++;
-}
-
-int
-co_rpdo_is_stopped(const co_rpdo_t *rpdo)
-{
-    return rpdo ? rpdo->stopped : 1;
-}
-
-int
-co_tpdo_start(co_tpdo_t *tpdo)
-{
-    if (!tpdo)
-        return -1;
-    if (!tpdo->stopped)
-        return 0;
-
-    tpdo->start_attempts++;
-    if (tpdo->start_failures_remaining) {
-        tpdo->start_failures_remaining--;
-        return -1;
-    }
-
-    tpdo->comm.trans = tpdo->dev->tpdo_type.value_u8;
-    tpdo->event_timer_active = RT_FALSE;
-    tpdo->event_pending = RT_FALSE;
-    tpdo->sync_count = 0;
-    tpdo->stopped = RT_FALSE;
-    tpdo->start_calls++;
-    return 0;
-}
-
-void
-co_tpdo_stop(co_tpdo_t *tpdo)
-{
-    if (!tpdo || tpdo->stopped)
-        return;
-
-    tpdo->event_timer_active = RT_FALSE;
-    tpdo->stopped = RT_TRUE;
-    tpdo->stop_calls++;
-}
-
-int
-co_tpdo_is_stopped(const co_tpdo_t *tpdo)
-{
-    return tpdo ? tpdo->stopped : 1;
-}
-
-co_sub_t *
-co_dev_find_sub(co_dev_t *dev, co_unsigned16_t idx, co_unsigned8_t subidx)
-{
-    if (!dev || subidx != 0x00) {
-        if (!dev || subidx != 0x02)
-            return RT_NULL;
-    }
-
-    if (idx == 0x1005 && subidx == 0x00)
-        return &dev->sync_cobid;
-    if (idx == 0x1006 && subidx == 0x00)
-        return &dev->sync_period;
-    if (idx == 0x1400 && subidx == 0x02)
-        return &dev->rpdo_type;
-    if (idx == 0x1800 && subidx == 0x02)
-        return &dev->tpdo_type;
-    return RT_NULL;
-}
-
-co_unsigned32_t
-co_dev_get_val_u32(const co_dev_t *dev, co_unsigned16_t idx,
-        co_unsigned8_t subidx)
-{
-    co_sub_t *sub = co_dev_find_sub((co_dev_t *)dev, idx, subidx);
-
-    return sub ? sub->value_u32 : 0;
-}
-
-co_unsigned32_t
-co_sub_get_val_u32(const co_sub_t *sub)
-{
-    return sub ? sub->value_u32 : 0;
-}
-
-co_unsigned8_t
-co_sub_get_val_u8(const co_sub_t *sub)
-{
-    return sub ? sub->value_u8 : 0;
-}
-
-co_unsigned16_t
-co_sub_get_type(const co_sub_t *sub)
-{
-    return sub ? sub->type : 0;
-}
-
-size_t
-co_sub_set_val_u8(co_sub_t *sub, co_unsigned8_t value)
-{
-    if (!sub || sub->type != CO_DEFTYPE_UNSIGNED8)
-        return 0;
-
-    sub->value_u8 = value;
-    return sizeof(value);
-}
-
-co_unsigned32_t
-co_sub_dn_ind_val(co_sub_t *sub, co_unsigned16_t type, const void *value)
-{
-    if (!sub || !value || type != sub->type)
-        return 0x06070010u;
-    if (sub->abort_code)
-        return sub->abort_code;
-
-    dn_calls++;
-    last_dn_index = sub->idx;
-    last_dn_subindex = sub->subidx;
-    if (type == CO_DEFTYPE_UNSIGNED32) {
-        sub->value_u32 = *(const co_unsigned32_t *)value;
-    } else if (type == CO_DEFTYPE_UNSIGNED8) {
-        sub->value_u8 = *(const co_unsigned8_t *)value;
-        if (sub->rpdo)
-            sub->rpdo->comm.trans = sub->value_u8;
-        if (sub->tpdo)
-            sub->tpdo->comm.trans = sub->value_u8;
-    } else {
-        return 0x06070010u;
-    }
-    return 0;
-}
-
-const struct co_pdo_comm_par *
-co_tpdo_get_comm_par(const co_tpdo_t *tpdo)
-{
-    return tpdo ? &tpdo->comm : RT_NULL;
-}
-
-const struct co_pdo_map_par *
-co_tpdo_get_map_par(const co_tpdo_t *tpdo)
-{
-    return tpdo ? &tpdo->map : RT_NULL;
-}
-
-int
-co_tpdo_event(co_tpdo_t *tpdo)
-{
-    if (!tpdo)
-        return -1;
-    tpdo->event_calls++;
-    return tpdo->event_result;
-}
-
-rt_err_t
-lely_rtt_master_sync_init(struct lely_rtt_master_sync *sync, const char *name)
-{
-    (void)name;
-    if (!sync)
-        return -RT_EINVAL;
-    memset(sync, 0, sizeof(*sync));
-    sync->initialized = RT_TRUE;
-    return RT_EOK;
-}
-
-void
-lely_rtt_master_sync_complete(struct lely_rtt_master_sync *sync,
-        rt_err_t result)
-{
-    if (!sync || sync->completed)
-        return;
-    sync->result = result;
-    sync->completed = RT_TRUE;
-}
-
-rt_err_t
-lely_rtt_master_sync_wait(struct lely_rtt_master_sync *sync)
-{
-    return sync && sync->completed ? sync->result : -RT_ERROR;
-}
-
-void
-lely_rtt_master_sync_fini(struct lely_rtt_master_sync *sync)
-{
-    if (sync)
-        sync->initialized = RT_FALSE;
-}
-
-rt_err_t
-lely_rtt_master_command_post(struct lely_rtt_runtime *runtime,
-        const struct lely_rtt_master_command *command)
-{
-    if (!runtime || !command)
-        return -RT_EINVAL;
-
-    if (command->type == LELY_RTT_MASTER_COMMAND_SYNC) {
-        lely_rtt_master_sync_dispatch(runtime, command->data.sync_control.request);
-    } else if (command->type == LELY_RTT_MASTER_COMMAND_PDO_TX) {
-        lely_rtt_master_pdo_dispatch(runtime, command->data.pdo.request);
-    } else {
-        return -RT_EINVAL;
-    }
-    return RT_EOK;
+        *data = nmt->sync_data;
 }
 
 static void
-app_sync_ind(lely_rtt_runtime_t *runtime,
+co_nmt_set_sync_ind(co_nmt_t *nmt, co_nmt_sync_ind_t *ind, void *data)
+{
+    nmt->sync_ind = ind;
+    nmt->sync_data = data;
+}
+
+static void *
+co_nmt_get_sync(co_nmt_t *nmt)
+{
+    nmt->get_sync_calls++;
+    return nmt->sync_service;
+}
+
+static co_rpdo_t *
+co_nmt_get_rpdo(co_nmt_t *nmt, co_unsigned16_t num)
+{
+    return num == 1u ? nmt->rpdo : NULL;
+}
+
+static co_tpdo_t *
+co_nmt_get_tpdo(co_nmt_t *nmt, co_unsigned16_t num)
+{
+    return num == 1u ? nmt->tpdo : NULL;
+}
+
+static int
+co_rpdo_is_stopped(const co_rpdo_t *pdo)
+{
+    return pdo->stopped;
+}
+
+static void
+co_rpdo_stop(co_rpdo_t *pdo)
+{
+    pdo->stop_calls++;
+    pdo->stopped = 1;
+}
+
+static int
+co_rpdo_start(co_rpdo_t *pdo)
+{
+    pdo->start_calls++;
+    if (pdo->start_failures_remaining) {
+        pdo->start_failures_remaining--;
+        pdo->stopped = 1;
+        return -1;
+    }
+    pdo->comm.trans = pdo->trans_sub->u8;
+    pdo->sync_pending = 0;
+    pdo->pending_frame = 0;
+    pdo->stopped = 0;
+    return 0;
+}
+
+static int
+co_tpdo_is_stopped(const co_tpdo_t *pdo)
+{
+    return pdo->stopped;
+}
+
+static void
+co_tpdo_stop(co_tpdo_t *pdo)
+{
+    pdo->stop_calls++;
+    pdo->stopped = 1;
+}
+
+static int
+co_tpdo_start(co_tpdo_t *pdo)
+{
+    pdo->start_calls++;
+    if (pdo->start_failures_remaining) {
+        pdo->start_failures_remaining--;
+        pdo->stopped = 1;
+        return -1;
+    }
+    pdo->comm.trans = pdo->trans_sub->u8;
+    pdo->event_timer_active = 0;
+    pdo->event_pending = 0;
+    pdo->sync_count = 0;
+    pdo->stopped = 0;
+    return 0;
+}
+
+static const struct co_pdo_comm_par *
+co_tpdo_get_comm_par(const co_tpdo_t *pdo)
+{
+    return &pdo->comm;
+}
+
+static const struct co_pdo_map_par *
+co_tpdo_get_map_par(const co_tpdo_t *pdo)
+{
+    return &pdo->map;
+}
+
+static int
+co_tpdo_event(co_tpdo_t *pdo)
+{
+    pdo->event_calls++;
+    return 0;
+}
+
+#include "../../port/rtthread/src/master_command.c"
+#include "../../port/rtthread/src/master_sync.c"
+#include "../../port/rtthread/src/master_pdo.c"
+
+static void
+sync_callback(lely_rtt_runtime_t *runtime,
         const struct lely_rtt_sync_event *event, void *data)
 {
-    struct b9_fixture *fixture = data;
-
-    if (runtime != &fixture->runtime)
-        return;
-    callback_called = RT_TRUE;
+    (void)runtime;
+    (void)data;
+    callback_calls++;
     callback_event = *event;
 }
 
 static void
-fixture_init(struct b9_fixture *fixture)
+fail(const char *name, const char *expr, int line)
 {
-    memset(fixture, 0, sizeof(*fixture));
-    delay_calls = 0;
-    dn_calls = 0;
-    last_dn_index = 0;
-    last_dn_subindex = 0;
-    callback_called = RT_FALSE;
-    memset(&callback_event, 0, sizeof(callback_event));
-    current_thread = (rt_thread_t)(uintptr_t)0x2222u;
-
-    fixture->runtime.event_initialized = RT_TRUE;
-    fixture->runtime.master_dev = &fixture->dev;
-    fixture->runtime.master_nmt = &fixture->nmt;
-
-    fixture->dev.sync_cobid.idx = 0x1005;
-    fixture->dev.sync_cobid.type = CO_DEFTYPE_UNSIGNED32;
-    fixture->dev.sync_cobid.value_u32 = CO_SYNC_COBID_PRODUCER | 0x80u;
-    fixture->dev.sync_period.idx = 0x1006;
-    fixture->dev.sync_period.type = CO_DEFTYPE_UNSIGNED32;
-    fixture->dev.sync_period.value_u32 = 1000000u;
-    fixture->dev.rpdo_type.idx = 0x1400;
-    fixture->dev.rpdo_type.subidx = 0x02;
-    fixture->dev.rpdo_type.type = CO_DEFTYPE_UNSIGNED8;
-    fixture->dev.rpdo_type.value_u8 = 255;
-    fixture->dev.rpdo_type.rpdo = &fixture->nmt.rpdo;
-    fixture->dev.tpdo_type.idx = 0x1800;
-    fixture->dev.tpdo_type.subidx = 0x02;
-    fixture->dev.tpdo_type.type = CO_DEFTYPE_UNSIGNED8;
-    fixture->dev.tpdo_type.value_u8 = 255;
-    fixture->dev.tpdo_type.tpdo = &fixture->nmt.tpdo;
-
-    fixture->nmt.sync_available = RT_TRUE;
-    fixture->nmt.rpdo.dev = &fixture->dev;
-    fixture->nmt.rpdo.comm.trans = 255;
-    fixture->nmt.tpdo.dev = &fixture->dev;
-    fixture->nmt.tpdo.comm.cobid = 0x201u;
-    fixture->nmt.tpdo.comm.trans = 255;
-    fixture->nmt.tpdo.map.n = 1;
+    fprintf(stderr, "FAIL %s line %d: %s\n", name, line, expr);
+    exit(1);
 }
 
-#define TEST_CHECK(condition) \
-    do { \
-        if (!(condition)) { \
-            fprintf(stderr, "%s:%d: check failed: %s\n", \
-                    __func__, __LINE__, #condition); \
-            return 1; \
-        } \
-    } while (0)
+#define CHECK(name, expr) do { if (!(expr)) fail((name), #expr, __LINE__); } while (0)
 
-static int
-test_sync_snapshot_and_callback(void)
+static void
+init_fixture(struct lely_rtt_runtime *runtime, struct fake_dev *dev,
+        struct fake_nmt *nmt, struct fake_rpdo *rpdo, struct fake_tpdo *tpdo)
 {
-    struct b9_fixture fixture;
-    struct lely_rtt_sync_event event;
+    memset(runtime, 0, sizeof(*runtime));
+    memset(dev, 0, sizeof(*dev));
+    memset(nmt, 0, sizeof(*nmt));
+    memset(rpdo, 0, sizeof(*rpdo));
+    memset(tpdo, 0, sizeof(*tpdo));
 
-    fixture_init(&fixture);
-    TEST_CHECK(lely_rtt_runtime_configure_sync_ind(&fixture.runtime,
-            &app_sync_ind, &fixture) == RT_EOK);
-    TEST_CHECK(lely_rtt_master_sync_bind(&fixture.runtime) == RT_EOK);
-    TEST_CHECK(fixture.nmt.sync_ind != RT_NULL);
+    dev->has_1005 = 1;
+    dev->has_1006 = 1;
+    dev->has_rpdo = 1;
+    dev->has_tpdo = 1;
+    dev->sub_1005.type = CO_DEFTYPE_UNSIGNED32;
+    dev->sub_1005.u32 = CO_SYNC_COBID_PRODUCER | 0x80u;
+    dev->sub_1006.type = CO_DEFTYPE_UNSIGNED32;
+    dev->rpdo_trans.type = CO_DEFTYPE_UNSIGNED8;
+    dev->rpdo_trans.u8 = 0xffu;
+    dev->tpdo_trans.type = CO_DEFTYPE_UNSIGNED8;
+    dev->tpdo_trans.u8 = 0xffu;
 
-    fixture.runtime.owner_thread = (rt_thread_t)(uintptr_t)0x1111u;
-    fixture.nmt.sync_ind(&fixture.nmt, 7, fixture.nmt.sync_ind_data);
+    dev->rpdo_trans.rpdo = rpdo;
+    dev->tpdo_trans.tpdo = tpdo;
+    rpdo->trans_sub = &dev->rpdo_trans;
+    rpdo->comm.trans = 0xffu;
+    tpdo->trans_sub = &dev->tpdo_trans;
+    tpdo->comm.trans = 0xffu;
+    tpdo->map.n = 1u;
 
-    TEST_CHECK(callback_called);
-    TEST_CHECK(callback_event.sequence == 1);
-    TEST_CHECK(callback_event.counter == 7);
-    TEST_CHECK(callback_event.period_us == 1000000u);
-    TEST_CHECK(callback_event.role == LELY_RTT_SYNC_ROLE_PRODUCER);
-    TEST_CHECK(lely_rtt_runtime_get_sync(&fixture.runtime, &event) == RT_EOK);
-    TEST_CHECK(event.sequence == 1);
-    TEST_CHECK(event.counter == 7);
-    TEST_CHECK(event.period_us == 1000000u);
-    TEST_CHECK(event.role == LELY_RTT_SYNC_ROLE_PRODUCER);
-    TEST_CHECK(delay_calls == 0);
-
-    fixture.dev.sync_cobid.value_u32 = 0x80u;
-    callback_called = RT_FALSE;
-    fixture.nmt.sync_ind(&fixture.nmt, 8, fixture.nmt.sync_ind_data);
-    TEST_CHECK(callback_called);
-    TEST_CHECK(callback_event.sequence == 2);
-    TEST_CHECK(callback_event.counter == 8);
-    TEST_CHECK(callback_event.period_us == 1000000u);
-    TEST_CHECK(callback_event.role == LELY_RTT_SYNC_ROLE_CONSUMER);
-    TEST_CHECK(lely_rtt_runtime_get_sync(&fixture.runtime, &event) == RT_EOK);
-    TEST_CHECK(event.sequence == 2);
-    TEST_CHECK(event.counter == 8);
-    TEST_CHECK(event.period_us == 1000000u);
-    TEST_CHECK(event.role == LELY_RTT_SYNC_ROLE_CONSUMER);
-
-    lely_rtt_master_sync_unbind(&fixture.runtime);
-    TEST_CHECK(fixture.nmt.sync_ind == RT_NULL);
-    return 0;
+    nmt->rpdo = rpdo;
+    nmt->tpdo = tpdo;
+    runtime->master_dev = dev;
+    runtime->master_nmt = nmt;
+    runtime->event_initialized = 1;
+    runtime->command_mq = &fake_queue;
+    memset(&fake_queue, 0, sizeof(fake_queue));
+    memset(&runtime->event, 0, sizeof(runtime->event));
+    rt_atomic_store(&runtime->command_refs, 0);
+    rt_atomic_store(&runtime->command_stop_latched, 0);
+    rt_atomic_store(&runtime->command_quiescing, 0);
+    dispatch_runtime = runtime;
+    command_posts = 0;
+    dispatch_calls = 0;
+    dn_calls = 0;
+    last_command_type = 0xffu;
 }
 
 static void
-foreign_sync_ind(co_nmt_t *nmt, co_unsigned8_t counter, void *data)
+test_sync_bind_before_service_creation(void)
+{
+    const char *name = "sync-bind-before-service-creation";
+    struct lely_rtt_runtime runtime;
+    struct fake_dev dev;
+    struct fake_nmt nmt;
+    struct fake_rpdo rpdo;
+    struct fake_tpdo tpdo;
+
+    init_fixture(&runtime, &dev, &nmt, &rpdo, &tpdo);
+    nmt.sync_service = NULL;
+    CHECK(name, lely_rtt_master_sync_bind(&runtime) == RT_EOK);
+    CHECK(name, nmt.sync_ind != NULL);
+    CHECK(name, nmt.sync_data == &runtime);
+    CHECK(name, nmt.get_sync_calls == 0);
+    puts("PASS sync-bind-before-service-creation");
+}
+
+static void foreign_sync_ind(co_nmt_t *nmt, co_unsigned8_t counter, void *data)
 {
     (void)nmt;
     (void)counter;
     (void)data;
 }
 
-static int
-test_sync_bind_ownership_and_registration_state(void)
+static void
+test_sync_bind_ownership(void)
 {
-    struct b9_fixture fixture;
+    const char *name = "sync-bind-ownership";
+    struct lely_rtt_runtime runtime;
+    struct fake_dev dev;
+    struct fake_nmt nmt;
+    struct fake_rpdo rpdo;
+    struct fake_tpdo tpdo;
 
-    fixture_init(&fixture);
-    fixture.nmt.sync_available = RT_FALSE;
-    TEST_CHECK(lely_rtt_master_sync_bind(&fixture.runtime) == -RT_ERROR);
-    TEST_CHECK(fixture.nmt.sync_ind == RT_NULL);
-
-    fixture.nmt.sync_available = RT_TRUE;
-    fixture.nmt.sync_ind = &foreign_sync_ind;
-    fixture.nmt.sync_ind_data = &fixture;
-    TEST_CHECK(lely_rtt_master_sync_bind(&fixture.runtime) == -RT_EBUSY);
-
-    fixture.nmt.sync_ind = RT_NULL;
-    fixture.nmt.sync_ind_data = RT_NULL;
-    fixture.runtime.owner_thread = (rt_thread_t)(uintptr_t)0x1111u;
-    TEST_CHECK(lely_rtt_runtime_configure_sync_ind(&fixture.runtime,
-            &app_sync_ind, &fixture) == -RT_EINVAL);
-    return 0;
+    init_fixture(&runtime, &dev, &nmt, &rpdo, &tpdo);
+    nmt.sync_ind = foreign_sync_ind;
+    CHECK(name, lely_rtt_master_sync_bind(&runtime) == -RT_EBUSY);
+    CHECK(name, nmt.sync_ind == foreign_sync_ind);
+    puts("PASS sync-bind-ownership");
 }
 
-static int
+static void
+test_sync_callback_registration_and_snapshot(void)
+{
+    const char *name = "sync-callback-registration-and-snapshot";
+    struct lely_rtt_runtime runtime;
+    struct fake_dev dev;
+    struct fake_nmt nmt;
+    struct fake_rpdo rpdo;
+    struct fake_tpdo tpdo;
+    struct lely_rtt_sync_event event;
+
+    init_fixture(&runtime, &dev, &nmt, &rpdo, &tpdo);
+    CHECK(name, lely_rtt_runtime_get_sync(&runtime, &event) == -RT_EBUSY);
+    CHECK(name, lely_rtt_runtime_configure_sync_ind(
+            &runtime, sync_callback, &runtime) == RT_EOK);
+    CHECK(name, runtime.sync_app_ind == sync_callback);
+    CHECK(name, runtime.sync_app_data == &runtime);
+    CHECK(name, lely_rtt_master_sync_bind(&runtime) == RT_EOK);
+
+    runtime.owner_thread = (rt_thread_t)(uintptr_t)0x5678u;
+    CHECK(name, lely_rtt_runtime_configure_sync_ind(
+            &runtime, RT_NULL, RT_NULL) == -RT_EINVAL);
+    CHECK(name, runtime.sync_app_ind == sync_callback);
+    CHECK(name, runtime.sync_app_data == &runtime);
+
+    dev.sub_1006.u32 = 1000u;
+    callback_calls = 0;
+    memset(&callback_event, 0, sizeof(callback_event));
+    nmt.sync_ind(&nmt, 7u, nmt.sync_data);
+    CHECK(name, callback_calls == 1);
+    CHECK(name, callback_event.sequence == 1u);
+    CHECK(name, callback_event.period_us == 1000u);
+    CHECK(name, callback_event.counter == 7u);
+    CHECK(name, callback_event.role == LELY_RTT_SYNC_ROLE_PRODUCER);
+    CHECK(name, lely_rtt_runtime_get_sync(&runtime, &event) == RT_EOK);
+    CHECK(name, event.sequence == 1u);
+    CHECK(name, event.period_us == 1000u);
+    CHECK(name, event.counter == 7u);
+    CHECK(name, event.role == LELY_RTT_SYNC_ROLE_PRODUCER);
+
+    dev.sub_1005.u32 = 0x80u;
+    nmt.sync_ind(&nmt, 8u, nmt.sync_data);
+    CHECK(name, callback_calls == 2);
+    CHECK(name, lely_rtt_runtime_get_sync(&runtime, &event) == RT_EOK);
+    CHECK(name, event.sequence == 2u);
+    CHECK(name, event.counter == 8u);
+    CHECK(name, event.role == LELY_RTT_SYNC_ROLE_CONSUMER);
+
+    lely_rtt_master_sync_unbind(&runtime);
+    CHECK(name, nmt.sync_ind == RT_NULL);
+    CHECK(name, nmt.sync_data == RT_NULL);
+    puts("PASS sync-callback-registration-and-snapshot");
+}
+
+static void
+test_public_owner_command_wiring(void)
+{
+    const char *name = "public-owner-command-wiring";
+    struct lely_rtt_runtime runtime;
+    struct fake_dev dev;
+    struct fake_nmt nmt;
+    struct fake_rpdo rpdo;
+    struct fake_tpdo tpdo;
+    rt_uint8_t transmission_type = 0;
+
+    init_fixture(&runtime, &dev, &nmt, &rpdo, &tpdo);
+    runtime.owner_thread = (rt_thread_t)(uintptr_t)0x5678u;
+    nmt.sync_service = &nmt;
+
+    CHECK(name, lely_rtt_runtime_sync_set_period(&runtime, 2500u) == RT_EOK);
+    CHECK(name, command_posts == 1);
+    CHECK(name, dispatch_calls == 1);
+    CHECK(name, last_command_type == LELY_RTT_MASTER_COMMAND_SYNC);
+    CHECK(name, dev.sub_1006.u32 == 2500u);
+
+    CHECK(name, lely_rtt_runtime_pdo_set_transmission(&runtime,
+            LELY_RTT_PDO_DIRECTION_TPDO, 1u, 1u) == RT_EOK);
+    CHECK(name, command_posts == 2);
+    CHECK(name, dispatch_calls == 2);
+    CHECK(name, last_command_type == LELY_RTT_MASTER_COMMAND_PDO_TX);
+    CHECK(name, dev.tpdo_trans.u8 == 1u);
+    CHECK(name, tpdo.comm.trans == 1u);
+
+    CHECK(name, lely_rtt_runtime_pdo_get_transmission(&runtime,
+            LELY_RTT_PDO_DIRECTION_TPDO, 1u, &transmission_type) == RT_EOK);
+    CHECK(name, transmission_type == 1u);
+    CHECK(name, command_posts == 3);
+    CHECK(name, dispatch_calls == 3);
+    CHECK(name, last_command_type == LELY_RTT_MASTER_COMMAND_PDO_TX);
+
+    CHECK(name, lely_rtt_runtime_pdo_set_transmission(&runtime,
+            LELY_RTT_PDO_DIRECTION_TPDO, 1u, 0u) == RT_EOK);
+    CHECK(name, lely_rtt_runtime_tpdo_event(&runtime, 1u) == RT_EOK);
+    CHECK(name, tpdo.event_calls == 1);
+    CHECK(name, last_command_type == LELY_RTT_MASTER_COMMAND_PDO_TX);
+    puts("PASS public-owner-command-wiring");
+}
+
+static void
 test_sync_period_control(void)
 {
-    struct b9_fixture fixture;
+    const char *name = "sync-period-control";
+    struct lely_rtt_runtime runtime;
+    struct fake_dev dev;
+    struct fake_nmt nmt;
+    struct fake_rpdo rpdo;
+    struct fake_tpdo tpdo;
 
-    fixture_init(&fixture);
-    fixture.runtime.owner_thread = (rt_thread_t)(uintptr_t)0x1111u;
-    TEST_CHECK(lely_rtt_runtime_sync_set_period(&fixture.runtime, 250000u)
-            == RT_EOK);
-    TEST_CHECK(fixture.dev.sync_period.value_u32 == 250000u);
-    TEST_CHECK(dn_calls == 1);
-    TEST_CHECK(last_dn_index == 0x1006 && last_dn_subindex == 0x00);
+    init_fixture(&runtime, &dev, &nmt, &rpdo, &tpdo);
+    runtime.owner_thread = (rt_thread_t)(uintptr_t)0x5678u;
+    nmt.sync_service = &nmt;
 
-    fixture.dev.sync_cobid.value_u32 = 0x80u;
-    TEST_CHECK(lely_rtt_runtime_sync_set_period(&fixture.runtime, 1000u)
-            == -RT_EBUSY);
-    TEST_CHECK(fixture.dev.sync_period.value_u32 == 250000u);
-    TEST_CHECK(lely_rtt_runtime_sync_set_period(&fixture.runtime, 0)
-            == RT_EOK);
-    TEST_CHECK(fixture.dev.sync_period.value_u32 == 0);
+    CHECK(name, lely_rtt_runtime_sync_set_period(&runtime, 2500u) == RT_EOK);
+    CHECK(name, dev.sub_1006.u32 == 2500u);
+    CHECK(name, dn_calls == 1);
 
-    fixture.dev.sync_cobid.value_u32 = CO_SYNC_COBID_PRODUCER | 0x80u;
-    fixture.dev.sync_period.abort_code = 0x06090030u;
-    TEST_CHECK(lely_rtt_runtime_sync_set_period(&fixture.runtime, 500000u)
-            == -RT_ERROR);
-    TEST_CHECK(fixture.dev.sync_period.value_u32 == 0);
-    return 0;
+    dev.sub_1005.u32 = 0x80u;
+    CHECK(name, lely_rtt_runtime_sync_set_period(&runtime, 1000u) == -RT_EBUSY);
+    CHECK(name, dev.sub_1006.u32 == 2500u);
+    CHECK(name, dn_calls == 1);
+    CHECK(name, lely_rtt_runtime_sync_set_period(&runtime, 0u) == RT_EOK);
+    CHECK(name, dev.sub_1006.u32 == 0u);
+    CHECK(name, dn_calls == 2);
+
+    dev.sub_1005.u32 = CO_SYNC_COBID_PRODUCER | 0x80u;
+    dev.sub_1006.dn_abort = 0x06090030;
+    CHECK(name, lely_rtt_runtime_sync_set_period(&runtime, 5000u) == -RT_ERROR);
+    CHECK(name, dev.sub_1006.u32 == 0u);
+    CHECK(name, dn_calls == 3);
+
+    dev.sub_1006.dn_abort = 0;
+    nmt.sync_service = RT_NULL;
+    CHECK(name, lely_rtt_runtime_sync_set_period(&runtime, 1000u) == -RT_EBUSY);
+    CHECK(name, dev.sub_1006.u32 == 0u);
+    CHECK(name, dn_calls == 3);
+    puts("PASS sync-period-control");
 }
 
-static int
+static void
 test_pdo_transmission_control(void)
 {
-    struct b9_fixture fixture;
-    rt_uint8_t value = 0;
-    unsigned int calls;
+    const char *name = "pdo-transmission-control";
+    struct lely_rtt_runtime runtime;
+    struct fake_dev dev;
+    struct fake_nmt nmt;
+    struct fake_rpdo rpdo;
+    struct fake_tpdo tpdo;
+    rt_uint8_t transmission_type = 0;
+    int stop_calls;
+    int start_calls;
+    int writes;
 
-    fixture_init(&fixture);
-    fixture.runtime.owner_thread = (rt_thread_t)(uintptr_t)0x1111u;
+    init_fixture(&runtime, &dev, &nmt, &rpdo, &tpdo);
+    runtime.owner_thread = (rt_thread_t)(uintptr_t)0x5678u;
 
-    TEST_CHECK(lely_rtt_runtime_pdo_set_transmission(&fixture.runtime,
-            LELY_RTT_PDO_DIRECTION_RPDO, 1, 1) == RT_EOK);
-    TEST_CHECK(fixture.dev.rpdo_type.value_u8 == 1);
-    TEST_CHECK(fixture.nmt.rpdo.comm.trans == 1);
-    TEST_CHECK(fixture.nmt.rpdo.stop_calls == 1);
-    TEST_CHECK(fixture.nmt.rpdo.start_calls == 1);
-    TEST_CHECK(last_dn_index == 0x1400 && last_dn_subindex == 0x02);
-    TEST_CHECK(lely_rtt_runtime_pdo_get_transmission(&fixture.runtime,
-            LELY_RTT_PDO_DIRECTION_RPDO, 1, &value) == RT_EOK);
-    TEST_CHECK(value == 1);
+    CHECK(name, lely_rtt_runtime_pdo_set_transmission(&runtime,
+            LELY_RTT_PDO_DIRECTION_TPDO, 1u, 1u) == RT_EOK);
+    CHECK(name, lely_rtt_runtime_pdo_get_transmission(&runtime,
+            LELY_RTT_PDO_DIRECTION_TPDO, 1u, &transmission_type) == RT_EOK);
+    CHECK(name, transmission_type == 1u);
+    CHECK(name, tpdo.stop_calls == 1);
+    CHECK(name, tpdo.start_calls == 1);
+    CHECK(name, tpdo.comm.trans == 1u);
 
-    TEST_CHECK(lely_rtt_runtime_pdo_set_transmission(&fixture.runtime,
-            LELY_RTT_PDO_DIRECTION_TPDO, 1, 0) == RT_EOK);
-    TEST_CHECK(fixture.dev.tpdo_type.value_u8 == 0);
-    TEST_CHECK(fixture.nmt.tpdo.comm.trans == 0);
-    TEST_CHECK(fixture.nmt.tpdo.stop_calls == 1);
-    TEST_CHECK(fixture.nmt.tpdo.start_calls == 1);
-    TEST_CHECK(last_dn_index == 0x1800 && last_dn_subindex == 0x02);
+    CHECK(name, lely_rtt_runtime_pdo_set_transmission(&runtime,
+            LELY_RTT_PDO_DIRECTION_RPDO, 1u, 1u) == RT_EOK);
+    CHECK(name, lely_rtt_runtime_pdo_get_transmission(&runtime,
+            LELY_RTT_PDO_DIRECTION_RPDO, 1u, &transmission_type) == RT_EOK);
+    CHECK(name, transmission_type == 1u);
+    CHECK(name, rpdo.stop_calls == 1);
+    CHECK(name, rpdo.start_calls == 1);
+    CHECK(name, rpdo.comm.trans == 1u);
 
-    TEST_CHECK(lely_rtt_runtime_pdo_set_transmission(&fixture.runtime,
-            LELY_RTT_PDO_DIRECTION_TPDO, 1, 240) == RT_EOK);
-    TEST_CHECK(fixture.dev.tpdo_type.value_u8 == 240);
-    TEST_CHECK(lely_rtt_runtime_pdo_get_transmission(&fixture.runtime,
-            LELY_RTT_PDO_DIRECTION_TPDO, 1, &value) == RT_EOK);
-    TEST_CHECK(value == 240);
+    CHECK(name, lely_rtt_runtime_pdo_set_transmission(&runtime,
+            LELY_RTT_PDO_DIRECTION_TPDO, 1u, 240u) == RT_EOK);
+    CHECK(name, dev.tpdo_trans.u8 == 240u);
+    CHECK(name, tpdo.comm.trans == 240u);
 
-    calls = dn_calls;
-    TEST_CHECK(lely_rtt_runtime_pdo_set_transmission(&fixture.runtime,
-            LELY_RTT_PDO_DIRECTION_TPDO, 1, 241) == -RT_EINVAL);
-    TEST_CHECK(dn_calls == calls);
-    TEST_CHECK(fixture.dev.tpdo_type.value_u8 == 240);
-    TEST_CHECK(lely_rtt_runtime_pdo_set_transmission(&fixture.runtime,
-            LELY_RTT_PDO_DIRECTION_TPDO, 1, 252) == -RT_EINVAL);
-    TEST_CHECK(dn_calls == calls);
-    TEST_CHECK(fixture.dev.tpdo_type.value_u8 == 240);
-    TEST_CHECK(lely_rtt_runtime_pdo_set_transmission(&fixture.runtime,
-            LELY_RTT_PDO_DIRECTION_TPDO, 1, 254) == RT_EOK);
-    TEST_CHECK(fixture.dev.tpdo_type.value_u8 == 254);
-    TEST_CHECK(lely_rtt_runtime_pdo_set_transmission(&fixture.runtime,
-            LELY_RTT_PDO_DIRECTION_TPDO, 1, 255) == RT_EOK);
-    TEST_CHECK(fixture.dev.tpdo_type.value_u8 == 255);
-    TEST_CHECK(fixture.nmt.tpdo.stop_calls == 3);
-    TEST_CHECK(fixture.nmt.tpdo.start_calls == 3);
+    CHECK(name, lely_rtt_runtime_pdo_set_transmission(&runtime,
+            LELY_RTT_PDO_DIRECTION_TPDO, 1u, 254u) == RT_EOK);
+    CHECK(name, dev.tpdo_trans.u8 == 254u);
+    CHECK(name, tpdo.comm.trans == 254u);
 
-    calls = dn_calls;
-    TEST_CHECK(lely_rtt_runtime_pdo_set_transmission(&fixture.runtime,
-            LELY_RTT_PDO_DIRECTION_TPDO, 1, 255) == RT_EOK);
-    TEST_CHECK(dn_calls == calls);
-    TEST_CHECK(fixture.nmt.tpdo.stop_calls == 3);
-    TEST_CHECK(fixture.nmt.tpdo.start_calls == 3);
-    return 0;
+    stop_calls = tpdo.stop_calls;
+    start_calls = tpdo.start_calls;
+    CHECK(name, lely_rtt_runtime_pdo_set_transmission(&runtime,
+            LELY_RTT_PDO_DIRECTION_TPDO, 1u, 255u) == RT_EOK);
+    CHECK(name, dev.tpdo_trans.u8 == 255u);
+    CHECK(name, tpdo.comm.trans == 255u);
+    CHECK(name, tpdo.stop_calls == stop_calls);
+    CHECK(name, tpdo.start_calls == start_calls);
+
+    writes = dn_calls;
+    CHECK(name, lely_rtt_runtime_pdo_set_transmission(&runtime,
+            LELY_RTT_PDO_DIRECTION_TPDO, 1u, 255u) == RT_EOK);
+    CHECK(name, dn_calls == writes);
+    CHECK(name, tpdo.stop_calls == stop_calls);
+    CHECK(name, tpdo.start_calls == start_calls);
+    puts("PASS pdo-transmission-control");
 }
 
-static int
-test_tpdo_transition_clears_stale_event_timer(void)
+static void
+test_pdo_rejected_values_preserve_state(void)
 {
-    struct b9_fixture fixture;
+    const char *name = "pdo-rejected-values-preserve-state";
+    struct lely_rtt_runtime runtime;
+    struct fake_dev dev;
+    struct fake_nmt nmt;
+    struct fake_rpdo rpdo;
+    struct fake_tpdo tpdo;
+    int posts;
 
-    fixture_init(&fixture);
-    fixture.runtime.owner_thread = (rt_thread_t)(uintptr_t)0x1111u;
-    fixture.nmt.tpdo.event_timer_active = RT_TRUE;
-    fixture.nmt.tpdo.event_pending = RT_TRUE;
-    fixture.nmt.tpdo.sync_count = 9;
+    init_fixture(&runtime, &dev, &nmt, &rpdo, &tpdo);
+    runtime.owner_thread = (rt_thread_t)(uintptr_t)0x5678u;
+    posts = command_posts;
 
-    TEST_CHECK(lely_rtt_runtime_pdo_set_transmission(&fixture.runtime,
-            LELY_RTT_PDO_DIRECTION_TPDO, 1, 0) == RT_EOK);
-    TEST_CHECK(fixture.dev.tpdo_type.value_u8 == 0);
-    TEST_CHECK(fixture.nmt.tpdo.comm.trans == 0);
-    TEST_CHECK(!fixture.nmt.tpdo.event_timer_active);
-    TEST_CHECK(!fixture.nmt.tpdo.event_pending);
-    TEST_CHECK(fixture.nmt.tpdo.sync_count == 0);
-    TEST_CHECK(fixture.nmt.tpdo.stop_calls == 1);
-    TEST_CHECK(fixture.nmt.tpdo.start_calls == 1);
-    return 0;
+    CHECK(name, lely_rtt_runtime_pdo_set_transmission(&runtime,
+            LELY_RTT_PDO_DIRECTION_TPDO, 1u, 241u) == -RT_EINVAL);
+    CHECK(name, lely_rtt_runtime_pdo_set_transmission(&runtime,
+            LELY_RTT_PDO_DIRECTION_TPDO, 1u, 253u) == -RT_EINVAL);
+    CHECK(name, command_posts == posts);
+    CHECK(name, dev.tpdo_trans.u8 == 255u);
+    CHECK(name, dn_calls == 0);
+    CHECK(name, tpdo.stop_calls == 0);
+    CHECK(name, tpdo.start_calls == 0);
+
+    dev.has_1005 = 0;
+    CHECK(name, lely_rtt_runtime_pdo_set_transmission(&runtime,
+            LELY_RTT_PDO_DIRECTION_TPDO, 1u, 1u) == -RT_ENOSYS);
+    CHECK(name, dev.tpdo_trans.u8 == 255u);
+    CHECK(name, dn_calls == 0);
+    CHECK(name, tpdo.stop_calls == 0);
+    CHECK(name, tpdo.start_calls == 0);
+
+    dev.has_1005 = 1;
+    dev.tpdo_trans.dn_abort = 0x06090030;
+    CHECK(name, lely_rtt_runtime_pdo_set_transmission(&runtime,
+            LELY_RTT_PDO_DIRECTION_TPDO, 1u, 1u) == -RT_ERROR);
+    CHECK(name, dev.tpdo_trans.u8 == 255u);
+    CHECK(name, dn_calls == 1);
+    CHECK(name, tpdo.stop_calls == 0);
+    CHECK(name, tpdo.start_calls == 0);
+    puts("PASS pdo-rejected-values-preserve-state");
 }
 
-static int
-test_rpdo_transition_drops_pending_synchronous_frame(void)
+static void
+test_tpdo_mode_transition_clears_transient_state(void)
 {
-    struct b9_fixture fixture;
+    const char *name = "tpdo-mode-transition-clears-transient-state";
+    struct lely_rtt_runtime runtime;
+    struct fake_dev dev;
+    struct fake_nmt nmt;
+    struct fake_rpdo rpdo;
+    struct fake_tpdo tpdo;
 
-    fixture_init(&fixture);
-    fixture.runtime.owner_thread = (rt_thread_t)(uintptr_t)0x1111u;
-    fixture.dev.rpdo_type.value_u8 = 1;
-    fixture.nmt.rpdo.comm.trans = 1;
-    fixture.nmt.rpdo.sync_pending = RT_TRUE;
-    fixture.nmt.rpdo.pending_frame = RT_TRUE;
+    init_fixture(&runtime, &dev, &nmt, &rpdo, &tpdo);
+    runtime.owner_thread = (rt_thread_t)(uintptr_t)0x5678u;
+    tpdo.event_timer_active = 1;
+    tpdo.event_pending = 1;
+    tpdo.sync_count = 9;
 
-    TEST_CHECK(lely_rtt_runtime_pdo_set_transmission(&fixture.runtime,
-            LELY_RTT_PDO_DIRECTION_RPDO, 1, 255) == RT_EOK);
-    TEST_CHECK(fixture.dev.rpdo_type.value_u8 == 255);
-    TEST_CHECK(fixture.nmt.rpdo.comm.trans == 255);
-    TEST_CHECK(!fixture.nmt.rpdo.sync_pending);
-    TEST_CHECK(!fixture.nmt.rpdo.pending_frame);
+    CHECK(name, lely_rtt_runtime_pdo_set_transmission(&runtime,
+            LELY_RTT_PDO_DIRECTION_TPDO, 1u, 0u) == RT_EOK);
+    CHECK(name, dev.tpdo_trans.u8 == 0u);
+    CHECK(name, tpdo.comm.trans == 0u);
+    CHECK(name, tpdo.event_timer_active == 0);
+    CHECK(name, tpdo.event_pending == 0);
+    CHECK(name, tpdo.sync_count == 0);
+    CHECK(name, tpdo.stop_calls == 1);
+    CHECK(name, tpdo.start_calls == 1);
 
-    TEST_CHECK(lely_rtt_runtime_pdo_set_transmission(&fixture.runtime,
-            LELY_RTT_PDO_DIRECTION_RPDO, 1, 1) == RT_EOK);
-    TEST_CHECK(fixture.dev.rpdo_type.value_u8 == 1);
-    TEST_CHECK(fixture.nmt.rpdo.comm.trans == 1);
-    TEST_CHECK(!fixture.nmt.rpdo.sync_pending);
-    TEST_CHECK(!fixture.nmt.rpdo.pending_frame);
-    TEST_CHECK(fixture.nmt.rpdo.stop_calls == 2);
-    TEST_CHECK(fixture.nmt.rpdo.start_calls == 2);
-    return 0;
+    tpdo.event_timer_active = 1;
+    tpdo.event_pending = 1;
+    tpdo.sync_count = 5;
+    CHECK(name, lely_rtt_runtime_pdo_set_transmission(&runtime,
+            LELY_RTT_PDO_DIRECTION_TPDO, 1u, 255u) == RT_EOK);
+    CHECK(name, dev.tpdo_trans.u8 == 255u);
+    CHECK(name, tpdo.comm.trans == 255u);
+    CHECK(name, tpdo.event_timer_active == 0);
+    CHECK(name, tpdo.event_pending == 0);
+    CHECK(name, tpdo.sync_count == 0);
+    CHECK(name, tpdo.stop_calls == 2);
+    CHECK(name, tpdo.start_calls == 2);
+    puts("PASS tpdo-mode-transition-clears-transient-state");
 }
 
-static int
-test_tpdo_restart_failure_rolls_back(void)
+static void
+test_rpdo_mode_transition_drops_pending_frame(void)
 {
-    struct b9_fixture fixture;
+    const char *name = "rpdo-mode-transition-drops-pending-frame";
+    struct lely_rtt_runtime runtime;
+    struct fake_dev dev;
+    struct fake_nmt nmt;
+    struct fake_rpdo rpdo;
+    struct fake_tpdo tpdo;
 
-    fixture_init(&fixture);
-    fixture.runtime.owner_thread = (rt_thread_t)(uintptr_t)0x1111u;
-    fixture.nmt.tpdo.start_failures_remaining = 1;
+    init_fixture(&runtime, &dev, &nmt, &rpdo, &tpdo);
+    runtime.owner_thread = (rt_thread_t)(uintptr_t)0x5678u;
+    dev.rpdo_trans.u8 = 1u;
+    rpdo.comm.trans = 1u;
+    rpdo.sync_pending = 1;
+    rpdo.pending_frame = 1;
 
-    TEST_CHECK(lely_rtt_runtime_pdo_set_transmission(&fixture.runtime,
-            LELY_RTT_PDO_DIRECTION_TPDO, 1, 0) == -RT_ERROR);
-    TEST_CHECK(fixture.dev.tpdo_type.value_u8 == 255);
-    TEST_CHECK(fixture.nmt.tpdo.comm.trans == 255);
-    TEST_CHECK(!fixture.nmt.tpdo.stopped);
-    TEST_CHECK(fixture.nmt.tpdo.stop_calls == 1);
-    TEST_CHECK(fixture.nmt.tpdo.start_attempts == 2);
-    TEST_CHECK(fixture.nmt.tpdo.start_calls == 1);
-
-    /* Retrying the requested new type must perform a real transition. */
-    TEST_CHECK(lely_rtt_runtime_pdo_set_transmission(&fixture.runtime,
-            LELY_RTT_PDO_DIRECTION_TPDO, 1, 0) == RT_EOK);
-    TEST_CHECK(fixture.dev.tpdo_type.value_u8 == 0);
-    TEST_CHECK(fixture.nmt.tpdo.comm.trans == 0);
-    TEST_CHECK(!fixture.nmt.tpdo.stopped);
-    TEST_CHECK(fixture.nmt.tpdo.stop_calls == 2);
-    TEST_CHECK(fixture.nmt.tpdo.start_attempts == 3);
-    TEST_CHECK(fixture.nmt.tpdo.start_calls == 2);
-    return 0;
+    CHECK(name, lely_rtt_runtime_pdo_set_transmission(&runtime,
+            LELY_RTT_PDO_DIRECTION_RPDO, 1u, 255u) == RT_EOK);
+    CHECK(name, dev.rpdo_trans.u8 == 255u);
+    CHECK(name, rpdo.comm.trans == 255u);
+    CHECK(name, rpdo.sync_pending == 0);
+    CHECK(name, rpdo.pending_frame == 0);
+    CHECK(name, rpdo.stop_calls == 1);
+    CHECK(name, rpdo.start_calls == 1);
+    puts("PASS rpdo-mode-transition-drops-pending-frame");
 }
 
-static int
+static void
+test_tpdo_sync_to_sync_restart_clears_transient_state(void)
+{
+    const char *name = "tpdo-sync-to-sync-restart-clears-transient-state";
+    struct lely_rtt_runtime runtime;
+    struct fake_dev dev;
+    struct fake_nmt nmt;
+    struct fake_rpdo rpdo;
+    struct fake_tpdo tpdo;
+
+    init_fixture(&runtime, &dev, &nmt, &rpdo, &tpdo);
+    runtime.owner_thread = (rt_thread_t)(uintptr_t)0x5678u;
+    dev.tpdo_trans.u8 = 1u;
+    tpdo.comm.trans = 1u;
+    tpdo.event_timer_active = 1;
+    tpdo.event_pending = 1;
+    tpdo.sync_count = 7;
+
+    CHECK(name, lely_rtt_runtime_pdo_set_transmission(&runtime,
+            LELY_RTT_PDO_DIRECTION_TPDO, 1u, 240u) == RT_EOK);
+    CHECK(name, dev.tpdo_trans.u8 == 240u);
+    CHECK(name, tpdo.comm.trans == 240u);
+    CHECK(name, tpdo.event_timer_active == 0);
+    CHECK(name, tpdo.event_pending == 0);
+    CHECK(name, tpdo.sync_count == 0);
+    CHECK(name, tpdo.stop_calls == 1);
+    CHECK(name, tpdo.start_calls == 1);
+    puts("PASS tpdo-sync-to-sync-restart-clears-transient-state");
+}
+
+static void
+test_rpdo_sync_to_sync_restart_drops_pending_frame(void)
+{
+    const char *name = "rpdo-sync-to-sync-restart-drops-pending-frame";
+    struct lely_rtt_runtime runtime;
+    struct fake_dev dev;
+    struct fake_nmt nmt;
+    struct fake_rpdo rpdo;
+    struct fake_tpdo tpdo;
+
+    init_fixture(&runtime, &dev, &nmt, &rpdo, &tpdo);
+    runtime.owner_thread = (rt_thread_t)(uintptr_t)0x5678u;
+    dev.rpdo_trans.u8 = 1u;
+    rpdo.comm.trans = 1u;
+    rpdo.sync_pending = 1;
+    rpdo.pending_frame = 1;
+
+    CHECK(name, lely_rtt_runtime_pdo_set_transmission(&runtime,
+            LELY_RTT_PDO_DIRECTION_RPDO, 1u, 240u) == RT_EOK);
+    CHECK(name, dev.rpdo_trans.u8 == 240u);
+    CHECK(name, rpdo.comm.trans == 240u);
+    CHECK(name, rpdo.sync_pending == 0);
+    CHECK(name, rpdo.pending_frame == 0);
+    CHECK(name, rpdo.stop_calls == 1);
+    CHECK(name, rpdo.start_calls == 1);
+    puts("PASS rpdo-sync-to-sync-restart-drops-pending-frame");
+}
+
+static void
+test_pdo_restart_failure_rolls_back(void)
+{
+    const char *name = "pdo-restart-failure-rolls-back";
+    struct lely_rtt_runtime runtime;
+    struct fake_dev dev;
+    struct fake_nmt nmt;
+    struct fake_rpdo rpdo;
+    struct fake_tpdo tpdo;
+
+    init_fixture(&runtime, &dev, &nmt, &rpdo, &tpdo);
+    runtime.owner_thread = (rt_thread_t)(uintptr_t)0x5678u;
+    tpdo.start_failures_remaining = 1;
+
+    CHECK(name, lely_rtt_runtime_pdo_set_transmission(&runtime,
+            LELY_RTT_PDO_DIRECTION_TPDO, 1u, 1u) == -RT_ERROR);
+    CHECK(name, dev.tpdo_trans.u8 == 255u);
+    CHECK(name, tpdo.start_calls == 2);
+    CHECK(name, tpdo.stopped == 0);
+    CHECK(name, tpdo.comm.trans == 255u);
+
+    CHECK(name, lely_rtt_runtime_pdo_set_transmission(&runtime,
+            LELY_RTT_PDO_DIRECTION_TPDO, 1u, 1u) == RT_EOK);
+    CHECK(name, dev.tpdo_trans.u8 == 1u);
+    CHECK(name, tpdo.start_calls == 3);
+    CHECK(name, tpdo.stop_calls == 2);
+    CHECK(name, tpdo.stopped == 0);
+    CHECK(name, tpdo.comm.trans == 1u);
+    puts("PASS pdo-restart-failure-rolls-back");
+}
+
+static void
 test_rpdo_restart_failure_rolls_back(void)
 {
-    struct b9_fixture fixture;
+    const char *name = "rpdo-restart-failure-rolls-back";
+    struct lely_rtt_runtime runtime;
+    struct fake_dev dev;
+    struct fake_nmt nmt;
+    struct fake_rpdo rpdo;
+    struct fake_tpdo tpdo;
 
-    fixture_init(&fixture);
-    fixture.runtime.owner_thread = (rt_thread_t)(uintptr_t)0x1111u;
-    fixture.nmt.rpdo.start_failures_remaining = 1;
+    init_fixture(&runtime, &dev, &nmt, &rpdo, &tpdo);
+    runtime.owner_thread = (rt_thread_t)(uintptr_t)0x5678u;
+    rpdo.start_failures_remaining = 1;
 
-    TEST_CHECK(lely_rtt_runtime_pdo_set_transmission(&fixture.runtime,
-            LELY_RTT_PDO_DIRECTION_RPDO, 1, 1) == -RT_ERROR);
-    TEST_CHECK(fixture.dev.rpdo_type.value_u8 == 255);
-    TEST_CHECK(fixture.nmt.rpdo.comm.trans == 255);
-    TEST_CHECK(!fixture.nmt.rpdo.stopped);
-    TEST_CHECK(fixture.nmt.rpdo.stop_calls == 1);
-    TEST_CHECK(fixture.nmt.rpdo.start_attempts == 2);
-    TEST_CHECK(fixture.nmt.rpdo.start_calls == 1);
+    CHECK(name, lely_rtt_runtime_pdo_set_transmission(&runtime,
+            LELY_RTT_PDO_DIRECTION_RPDO, 1u, 1u) == -RT_ERROR);
+    CHECK(name, dev.rpdo_trans.u8 == 255u);
+    CHECK(name, rpdo.start_calls == 2);
+    CHECK(name, rpdo.stopped == 0);
+    CHECK(name, rpdo.comm.trans == 255u);
 
-    TEST_CHECK(lely_rtt_runtime_pdo_set_transmission(&fixture.runtime,
-            LELY_RTT_PDO_DIRECTION_RPDO, 1, 1) == RT_EOK);
-    TEST_CHECK(fixture.dev.rpdo_type.value_u8 == 1);
-    TEST_CHECK(fixture.nmt.rpdo.comm.trans == 1);
-    TEST_CHECK(!fixture.nmt.rpdo.stopped);
-    TEST_CHECK(fixture.nmt.rpdo.stop_calls == 2);
-    TEST_CHECK(fixture.nmt.rpdo.start_attempts == 3);
-    TEST_CHECK(fixture.nmt.rpdo.start_calls == 2);
-    return 0;
+    CHECK(name, lely_rtt_runtime_pdo_set_transmission(&runtime,
+            LELY_RTT_PDO_DIRECTION_RPDO, 1u, 1u) == RT_EOK);
+    CHECK(name, dev.rpdo_trans.u8 == 1u);
+    CHECK(name, rpdo.start_calls == 3);
+    CHECK(name, rpdo.stop_calls == 2);
+    CHECK(name, rpdo.stopped == 0);
+    CHECK(name, rpdo.comm.trans == 1u);
+    puts("PASS rpdo-restart-failure-rolls-back");
 }
 
-static int
-test_tpdo_rollback_restart_failure_fails_closed(void)
+static void
+test_pdo_rollback_restart_failure_fails_closed(void)
 {
-    struct b9_fixture fixture;
-    unsigned int calls;
+    const char *name = "pdo-rollback-restart-failure-fails-closed";
+    struct lely_rtt_runtime runtime;
+    struct fake_dev dev;
+    struct fake_nmt nmt;
+    struct fake_rpdo rpdo;
+    struct fake_tpdo tpdo;
+    int writes;
+    int start_calls;
 
-    fixture_init(&fixture);
-    fixture.runtime.owner_thread = (rt_thread_t)(uintptr_t)0x1111u;
-    fixture.nmt.tpdo.start_failures_remaining = 2;
+    init_fixture(&runtime, &dev, &nmt, &rpdo, &tpdo);
+    runtime.owner_thread = (rt_thread_t)(uintptr_t)0x5678u;
+    tpdo.start_failures_remaining = 2;
 
-    TEST_CHECK(lely_rtt_runtime_pdo_set_transmission(&fixture.runtime,
-            LELY_RTT_PDO_DIRECTION_TPDO, 1, 0) == -RT_ERROR);
-    TEST_CHECK(fixture.dev.tpdo_type.value_u8 == 255);
-    TEST_CHECK(fixture.nmt.tpdo.stopped);
-    TEST_CHECK(fixture.nmt.tpdo.start_attempts == 2);
-    TEST_CHECK(fixture.nmt.tpdo.start_calls == 0);
+    CHECK(name, lely_rtt_runtime_pdo_set_transmission(&runtime,
+            LELY_RTT_PDO_DIRECTION_TPDO, 1u, 1u) == -RT_ERROR);
+    CHECK(name, dev.tpdo_trans.u8 == 255u);
+    CHECK(name, tpdo.start_calls == 2);
+    CHECK(name, tpdo.stopped == 1);
 
-    calls = dn_calls;
-    TEST_CHECK(lely_rtt_runtime_pdo_set_transmission(&fixture.runtime,
-            LELY_RTT_PDO_DIRECTION_TPDO, 1, 0) == -RT_EBUSY);
-    TEST_CHECK(dn_calls == calls);
-    TEST_CHECK(fixture.dev.tpdo_type.value_u8 == 255);
-    TEST_CHECK(fixture.nmt.tpdo.stopped);
-
-    TEST_CHECK(lely_rtt_runtime_tpdo_event(&fixture.runtime, 1) == -RT_EBUSY);
-    TEST_CHECK(fixture.nmt.tpdo.event_calls == 0);
-    return 0;
+    writes = dn_calls;
+    start_calls = tpdo.start_calls;
+    CHECK(name, lely_rtt_runtime_pdo_set_transmission(&runtime,
+            LELY_RTT_PDO_DIRECTION_TPDO, 1u, 1u) == -RT_EBUSY);
+    CHECK(name, dev.tpdo_trans.u8 == 255u);
+    CHECK(name, dn_calls == writes);
+    CHECK(name, tpdo.start_calls == start_calls);
+    CHECK(name, tpdo.stopped == 1);
+    CHECK(name, lely_rtt_runtime_tpdo_event(&runtime, 1u) == -RT_EBUSY);
+    CHECK(name, tpdo.event_calls == 0);
+    puts("PASS pdo-rollback-restart-failure-fails-closed");
 }
 
-static int
+static void
 test_tpdo_event_modes(void)
 {
-    struct b9_fixture fixture;
+    const char *name = "tpdo-event-modes";
+    struct lely_rtt_runtime runtime;
+    struct fake_dev dev;
+    struct fake_nmt nmt;
+    struct fake_rpdo rpdo;
+    struct fake_tpdo tpdo;
 
-    fixture_init(&fixture);
-    fixture.runtime.owner_thread = (rt_thread_t)(uintptr_t)0x1111u;
+    init_fixture(&runtime, &dev, &nmt, &rpdo, &tpdo);
+    runtime.owner_thread = (rt_thread_t)(uintptr_t)0x5678u;
+    tpdo.comm.trans = 0u;
+    nmt.sync_service = RT_NULL;
+    CHECK(name, lely_rtt_runtime_tpdo_event(&runtime, 1u) == -RT_EBUSY);
+    CHECK(name, tpdo.event_calls == 0);
 
-    fixture.nmt.tpdo.comm.trans = 0;
-    TEST_CHECK(lely_rtt_runtime_tpdo_event(&fixture.runtime, 1) == RT_EOK);
-    TEST_CHECK(fixture.nmt.tpdo.event_calls == 1);
+    nmt.sync_service = &nmt;
+    CHECK(name, lely_rtt_runtime_tpdo_event(&runtime, 1u) == RT_EOK);
+    CHECK(name, tpdo.event_calls == 1);
 
-    fixture.nmt.sync_available = RT_FALSE;
-    TEST_CHECK(lely_rtt_runtime_tpdo_event(&fixture.runtime, 1) == -RT_EBUSY);
-    TEST_CHECK(fixture.nmt.tpdo.event_calls == 1);
+    tpdo.comm.trans = 1u;
+    CHECK(name, lely_rtt_runtime_tpdo_event(&runtime, 1u) == -RT_EINVAL);
+    CHECK(name, tpdo.event_calls == 1);
 
-    fixture.nmt.sync_available = RT_TRUE;
-    fixture.nmt.tpdo.comm.trans = 1;
-    TEST_CHECK(lely_rtt_runtime_tpdo_event(&fixture.runtime, 1) == -RT_EINVAL);
-    TEST_CHECK(fixture.nmt.tpdo.event_calls == 1);
+    tpdo.comm.trans = 254u;
+    CHECK(name, lely_rtt_runtime_tpdo_event(&runtime, 1u) == RT_EOK);
+    CHECK(name, tpdo.event_calls == 2);
+    tpdo.comm.trans = 255u;
+    CHECK(name, lely_rtt_runtime_tpdo_event(&runtime, 1u) == RT_EOK);
+    CHECK(name, tpdo.event_calls == 3);
 
-    fixture.nmt.tpdo.comm.trans = 254;
-    TEST_CHECK(lely_rtt_runtime_tpdo_event(&fixture.runtime, 1) == RT_EOK);
-    TEST_CHECK(fixture.nmt.tpdo.event_calls == 2);
-
-    fixture.nmt.tpdo.map.n = 0;
-    TEST_CHECK(lely_rtt_runtime_tpdo_event(&fixture.runtime, 1) == -RT_EINVAL);
-    TEST_CHECK(fixture.nmt.tpdo.event_calls == 2);
-    return 0;
+    tpdo.map.n = 0u;
+    CHECK(name, lely_rtt_runtime_tpdo_event(&runtime, 1u) == -RT_EINVAL);
+    CHECK(name, tpdo.event_calls == 3);
+    tpdo.map.n = 1u;
+    tpdo.comm.cobid = CO_PDO_COBID_VALID | 0x201u;
+    CHECK(name, lely_rtt_runtime_tpdo_event(&runtime, 1u) == -RT_EINVAL);
+    CHECK(name, tpdo.event_calls == 3);
+    puts("PASS tpdo-event-modes");
 }
 
-static int
+static void
 test_owner_thread_wait_rejected(void)
 {
-    struct b9_fixture fixture;
+    const char *name = "owner-thread-wait-rejected";
+    struct lely_rtt_runtime runtime;
+    struct fake_dev dev;
+    struct fake_nmt nmt;
+    struct fake_rpdo rpdo;
+    struct fake_tpdo tpdo;
+    rt_uint8_t transmission_type = 0xa5u;
 
-    fixture_init(&fixture);
-    fixture.runtime.owner_thread = current_thread;
-    TEST_CHECK(lely_rtt_runtime_sync_set_period(&fixture.runtime, 1000u)
-            == -RT_EINVAL);
-    TEST_CHECK(lely_rtt_runtime_pdo_set_transmission(&fixture.runtime,
-            LELY_RTT_PDO_DIRECTION_TPDO, 1, 1) == -RT_EINVAL);
-    TEST_CHECK(lely_rtt_runtime_tpdo_event(&fixture.runtime, 1) == -RT_EINVAL);
-    return 0;
+    init_fixture(&runtime, &dev, &nmt, &rpdo, &tpdo);
+    runtime.owner_thread = fake_self;
+    CHECK(name, lely_rtt_runtime_sync_set_period(&runtime, 1000u) == -RT_EINVAL);
+    CHECK(name, lely_rtt_runtime_pdo_set_transmission(&runtime,
+            LELY_RTT_PDO_DIRECTION_TPDO, 1u, 1u) == -RT_EINVAL);
+    CHECK(name, lely_rtt_runtime_pdo_get_transmission(&runtime,
+            LELY_RTT_PDO_DIRECTION_TPDO, 1u, &transmission_type) == -RT_EINVAL);
+    CHECK(name, transmission_type == 0xa5u);
+    CHECK(name, lely_rtt_runtime_tpdo_event(&runtime, 1u) == -RT_EINVAL);
+    CHECK(name, command_posts == 0);
+    CHECK(name, fake_queue.count == 0u);
+    puts("PASS owner-thread-wait-rejected");
 }
-
-struct test_case {
-    const char *name;
-    int (*run)(void);
-};
 
 int
 main(void)
 {
-    static const struct test_case cases[] = {
-        { "sync-snapshot-and-callback", &test_sync_snapshot_and_callback },
-        { "sync-bind-ownership", &test_sync_bind_ownership_and_registration_state },
-        { "sync-period-control", &test_sync_period_control },
-        { "pdo-transmission-control", &test_pdo_transmission_control },
-        { "tpdo-transition-clears-event-timer",
-                &test_tpdo_transition_clears_stale_event_timer },
-        { "rpdo-transition-drops-pending-frame",
-                &test_rpdo_transition_drops_pending_synchronous_frame },
-        { "tpdo-restart-failure-rolls-back",
-                &test_tpdo_restart_failure_rolls_back },
-        { "rpdo-restart-failure-rolls-back",
-                &test_rpdo_restart_failure_rolls_back },
-        { "tpdo-rollback-restart-failure-fails-closed",
-                &test_tpdo_rollback_restart_failure_fails_closed },
-        { "tpdo-event-modes", &test_tpdo_event_modes },
-        { "owner-thread-wait-rejected", &test_owner_thread_wait_rejected },
-    };
-    unsigned int passed = 0;
-    unsigned int i;
-
-    for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-        if (cases[i].run()) {
-            fprintf(stderr, "FAIL %s\n", cases[i].name);
-            continue;
-        }
-        printf("PASS %s\n", cases[i].name);
-        passed++;
-    }
-
-    printf("Passed %u/%u host B9 cases\n", passed,
-            (unsigned int)(sizeof(cases) / sizeof(cases[0])));
-    return passed == sizeof(cases) / sizeof(cases[0]) ? 0 : 1;
+    test_sync_bind_before_service_creation();
+    test_sync_bind_ownership();
+    test_sync_callback_registration_and_snapshot();
+    test_public_owner_command_wiring();
+    test_sync_period_control();
+    test_pdo_transmission_control();
+    test_pdo_rejected_values_preserve_state();
+    test_tpdo_mode_transition_clears_transient_state();
+    test_rpdo_mode_transition_drops_pending_frame();
+    test_tpdo_sync_to_sync_restart_clears_transient_state();
+    test_rpdo_sync_to_sync_restart_drops_pending_frame();
+    test_pdo_restart_failure_rolls_back();
+    test_rpdo_restart_failure_rolls_back();
+    test_pdo_rollback_restart_failure_fails_closed();
+    test_tpdo_event_modes();
+    test_owner_thread_wait_rejected();
+    puts("Passed 16/16 host B9 cases");
+    return 0;
 }

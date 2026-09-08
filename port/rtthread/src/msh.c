@@ -9,7 +9,8 @@
  * 2026-09-06     wdfk-prog         expose TPDO trigger and EMCY diagnostics
  * 2026-09-06     wdfk-prog         avoid long-long formatting in TIME status
  * 2026-09-06     wdfk-prog         show manual CFG stage and source diagnostics
- * 2026-09-06     wdfk-prog         add SYNC and synchronous PDO controls
+ * 2026-09-07     wdfk-prog         expose local EMCY producer test commands
+ * 2026-09-08     wdfk-prog         expose SYNC and synchronous PDO controls
  */
 
 /**
@@ -250,6 +251,8 @@ lely_rtt_msh_help(void)
 #endif /* defined(PKG_LELY_USING_MASTER_SYNC_PDO) */
 #if defined(PKG_LELY_USING_MASTER_EMCY)
     rt_kprintf("co emcy [node-id]\n");
+    rt_kprintf("co emcy push <eec> <error-register> [msef-10hex]\n");
+    rt_kprintf("co emcy pop|clear\n");
 #endif /* defined(PKG_LELY_USING_MASTER_EMCY) */
 #if defined(PKG_LELY_USING_MASTER_TIME)
     rt_kprintf("co time status\n");
@@ -944,6 +947,49 @@ lely_rtt_msh_pdo(int argc, char **argv)
 #endif /* defined(PKG_LELY_USING_MASTER_SYNC_PDO) */
 
 #if defined(PKG_LELY_USING_MASTER_EMCY)
+/** @brief Convert one hexadecimal character to its numeric value. */
+static rt_bool_t
+lely_rtt_msh_hex_nibble(char ch, rt_uint8_t *value)
+{
+    if (!value)
+        return RT_FALSE;
+    if (ch >= '0' && ch <= '9')
+        *value = (rt_uint8_t)(ch - '0');
+    else if (ch >= 'a' && ch <= 'f')
+        *value = (rt_uint8_t)(ch - 'a' + 10);
+    else if (ch >= 'A' && ch <= 'F')
+        *value = (rt_uint8_t)(ch - 'A' + 10);
+    else
+        return RT_FALSE;
+    return RT_TRUE;
+}
+
+/** @brief Parse the optional five-byte EMCY manufacturer field. */
+static rt_bool_t
+lely_rtt_msh_parse_emcy_msef(const char *text,
+        rt_uint8_t manufacturer[LELY_RTT_EMCY_MSEF_SIZE])
+{
+    rt_size_t i;
+
+    if (!text || !manufacturer)
+        return RT_FALSE;
+    if (text[0] == '0' && (text[1] == 'x' || text[1] == 'X'))
+        text += 2;
+    if (strlen(text) != LELY_RTT_EMCY_MSEF_SIZE * 2u)
+        return RT_FALSE;
+
+    for (i = 0; i < LELY_RTT_EMCY_MSEF_SIZE; i++) {
+        rt_uint8_t hi;
+        rt_uint8_t lo;
+
+        if (!lely_rtt_msh_hex_nibble(text[i * 2u], &hi)
+                || !lely_rtt_msh_hex_nibble(text[i * 2u + 1u], &lo))
+            return RT_FALSE;
+        manufacturer[i] = (rt_uint8_t)((hi << 4) | lo);
+    }
+    return RT_TRUE;
+}
+
 static void
 lely_rtt_msh_emcy(int argc, char **argv)
 {
@@ -952,12 +998,53 @@ lely_rtt_msh_emcy(int argc, char **argv)
     rt_uint8_t node_id = 0;
     rt_err_t err;
 
+    if (argc >= 3 && !strcmp(argv[2], "push")) {
+        rt_uint8_t manufacturer[LELY_RTT_EMCY_MSEF_SIZE] = { 0 };
+        rt_uint32_t error_code;
+        rt_uint32_t error_register;
+
+        if ((argc != 5 && argc != 6)
+                || !lely_rtt_msh_parse_u32(argv[3], 0xffffu, &error_code)
+                || !error_code
+                || !lely_rtt_msh_parse_u32(argv[4], 0xffu, &error_register)
+                || (argc == 6 && !lely_rtt_msh_parse_emcy_msef(argv[5], manufacturer))) {
+            rt_kprintf("co: usage: co emcy push <eec> <error-register> [msef-10hex]\n");
+            return;
+        }
+
+        runtime = lely_rtt_msh_runtime();
+        if (!runtime)
+            return;
+        err = lely_rtt_runtime_emcy_push(runtime, (rt_uint16_t)error_code,
+                (rt_uint8_t)error_register, manufacturer);
+        if (err != RT_EOK)
+            rt_kprintf("co: EMCY push failed (%d)\n", err);
+        else
+            rt_kprintf("emcy: local push accepted\n");
+        return;
+    }
+
+    if (argc == 3 && (!strcmp(argv[2], "pop") || !strcmp(argv[2], "clear"))) {
+        runtime = lely_rtt_msh_runtime();
+        if (!runtime)
+            return;
+        if (!strcmp(argv[2], "pop"))
+            err = lely_rtt_runtime_emcy_pop(runtime);
+        else
+            err = lely_rtt_runtime_emcy_clear(runtime);
+        if (err != RT_EOK)
+            rt_kprintf("co: EMCY %s failed (%d)\n", argv[2], err);
+        else
+            rt_kprintf("emcy: local %s accepted\n", argv[2]);
+        return;
+    }
+
     if (argc != 2 && argc != 3) {
         lely_rtt_msh_help();
         return;
     }
     if (argc == 3 && !lely_rtt_msh_parse_node(argv[2], &node_id)) {
-        rt_kprintf("co: EMCY node-id must be 1..127\n");
+        rt_kprintf("co: EMCY command must be push|pop|clear or node-id 1..127\n");
         return;
     }
 

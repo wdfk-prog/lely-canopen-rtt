@@ -12,13 +12,11 @@ def find_host_compiler():
     override = os.environ.get("HOST_CC")
     if override:
         return shutil.which(override)
-
     for candidate in ("cc", "gcc", "clang"):
         compiler = shutil.which(candidate)
         if compiler:
             return compiler
     return None
-
 
 
 class MasterSyncPdoHostHarnessTests(unittest.TestCase):
@@ -59,21 +57,25 @@ class MasterSyncPdoHostHarnessTests(unittest.TestCase):
             )
 
         for name in (
-            "sync-snapshot-and-callback",
+            "sync-bind-before-service-creation",
             "sync-bind-ownership",
+            "sync-callback-registration-and-snapshot",
+            "public-owner-command-wiring",
             "sync-period-control",
             "pdo-transmission-control",
-            "tpdo-transition-clears-event-timer",
-            "rpdo-transition-drops-pending-frame",
-            "tpdo-restart-failure-rolls-back",
+            "pdo-rejected-values-preserve-state",
+            "tpdo-mode-transition-clears-transient-state",
+            "rpdo-mode-transition-drops-pending-frame",
+            "tpdo-sync-to-sync-restart-clears-transient-state",
+            "rpdo-sync-to-sync-restart-drops-pending-frame",
+            "pdo-restart-failure-rolls-back",
             "rpdo-restart-failure-rolls-back",
-            "tpdo-rollback-restart-failure-fails-closed",
+            "pdo-rollback-restart-failure-fails-closed",
             "tpdo-event-modes",
             "owner-thread-wait-rejected",
         ):
             self.assertIn(f"PASS {name}", completed.stdout)
-        self.assertIn("Passed 11/11 host B9 cases", completed.stdout)
-
+        self.assertIn("Passed 16/16 host B9 cases", completed.stdout)
 
 
 if __name__ == "__main__":

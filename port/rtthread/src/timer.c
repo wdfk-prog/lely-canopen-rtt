@@ -4,6 +4,7 @@
  * Change Logs:
  * Date           Author            Notes
  * 2026-09-03     wdfk-prog         first version
+ * 2026-09-08     wdfk-prog         synchronize passive and CAN network protocol clocks
  */
 
 /**
@@ -205,6 +206,42 @@ lely_rtt_timer_advance(struct lely_rtt_runtime *runtime)
     /* io_clock_settime() runs only on the owner, preserving no-thread access. */
     if (lely_rtt_time_now(runtime, &now) == RT_EOK)
         io_clock_settime(io_timer_get_clock(runtime->timer), &now);
+}
+
+/**
+ * @brief Refresh io_can_net protocol time from the already-advanced passive clock.
+ *
+ * The owner calls this only after draining executor work queued by the current
+ * RX/status batch. This ordering prevents an already-received CAN response from
+ * being overtaken by its timeout, while still giving a later command a current
+ * time base for newly created relative deadlines.
+ *
+ * @param runtime Runtime instance; must be called by the owner thread.
+ */
+void
+lely_rtt_timer_sync_can_net(struct lely_rtt_runtime *runtime)
+{
+    rt_err_t err = RT_EOK;
+
+    if (!runtime || !runtime->can_net)
+        return;
+
+    if (io_can_net_lock(runtime->can_net) != 0) {
+        err = -RT_ERROR;
+    } else {
+        if (io_can_net_set_time(runtime->can_net) == -1)
+            err = -RT_ERROR;
+        if (io_can_net_unlock(runtime->can_net) != 0 && err == RT_EOK)
+            err = -RT_ERROR;
+    }
+
+    if (err != RT_EOK) {
+        LELY_RTT_LOG_E("CAN network time synchronization failed");
+        if (runtime->runtime_error == RT_EOK)
+            runtime->runtime_error = err;
+        if (runtime->event_initialized)
+            rt_event_send(&runtime->event, LELY_RTT_EVENT_STOP);
+    }
 }
 
 /**

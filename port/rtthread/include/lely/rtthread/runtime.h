@@ -14,7 +14,7 @@
  * 2026-09-06     wdfk-prog         add B5.2 TPDO and B6 EMCY application APIs
  * 2026-09-06     wdfk-prog         document synchronous API thread-context contract
  * 2026-09-06     wdfk-prog         add B8 manual CFG data and diagnostic APIs
- * 2026-09-06     wdfk-prog         add B9 SYNC and synchronous PDO application APIs
+ * 2026-09-08     wdfk-prog         add B9 SYNC and synchronous PDO application APIs
  */
 
 /**
