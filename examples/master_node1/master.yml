@@ -30,7 +30,3 @@ node1:
   boot: true
   mandatory: false
   reset_communication: true
-  sdo:
-    - index: 0x2000
-      sub_index: 0
-      value: 0xA5A55A5A

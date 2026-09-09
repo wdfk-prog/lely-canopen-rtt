@@ -7,7 +7,10 @@
  * 2026-09-05     wdfk-prog         expose configuration, local OD and TIME commands
  * 2026-09-06     wdfk-prog         clarify unsupported CFG restore diagnostic
  * 2026-09-06     wdfk-prog         expose TPDO trigger and EMCY diagnostics
+ * 2026-09-06     wdfk-prog         avoid long-long formatting in TIME status
+ * 2026-09-06     wdfk-prog         show manual CFG stage and source diagnostics
  * 2026-09-07     wdfk-prog         expose local EMCY producer test commands
+ * 2026-09-08     wdfk-prog         expose SYNC and synchronous PDO controls
  */
 
 /**
@@ -241,6 +244,11 @@ lely_rtt_msh_help(void)
 #if defined(PKG_LELY_USING_MASTER_PDO_TX)
     rt_kprintf("co tpdo event <pdo-number>\n");
 #endif /* defined(PKG_LELY_USING_MASTER_PDO_TX) */
+#if defined(PKG_LELY_USING_MASTER_SYNC_PDO)
+    rt_kprintf("co sync status\n");
+    rt_kprintf("co sync period <microseconds>\n");
+    rt_kprintf("co pdo trans rx|tx <pdo-number> [0..240|254|255]\n");
+#endif /* defined(PKG_LELY_USING_MASTER_SYNC_PDO) */
 #if defined(PKG_LELY_USING_MASTER_EMCY)
     rt_kprintf("co emcy [node-id]\n");
     rt_kprintf("co emcy push <eec> <error-register> [msef-10hex]\n");
@@ -420,10 +428,61 @@ lely_rtt_msh_nmt(const char *command_text, const char *target_text)
 #endif /* defined(PKG_LELY_USING_MASTER_COMMAND) */
 
 #if defined(PKG_LELY_USING_MASTER_NMT_CFG)
+static const char *
+lely_rtt_msh_cfg_stage_name(enum lely_rtt_nmt_cfg_stage stage)
+{
+    switch (stage) {
+    case LELY_RTT_NMT_CFG_STAGE_QUEUED:
+        return "queued";
+    case LELY_RTT_NMT_CFG_STAGE_OWNER_PRECHECK:
+        return "precheck";
+    case LELY_RTT_NMT_CFG_STAGE_LELY_SEQUENCE:
+        return "lely";
+    case LELY_RTT_NMT_CFG_STAGE_APPLICATION_DCF:
+        return "app-dcf";
+    case LELY_RTT_NMT_CFG_STAGE_COMPLETE:
+        return "complete";
+    default:
+        return "unknown";
+    }
+}
+
+static void
+lely_rtt_msh_cfg_print_diag(const struct lely_rtt_nmt_cfg_diagnostic *diag)
+{
+    rt_bool_t printed = RT_FALSE;
+
+    rt_kprintf(" stage=%s source=", lely_rtt_msh_cfg_stage_name(diag->stage));
+    if (diag->source_flags & LELY_RTT_NMT_CFG_SOURCE_OBJECT_1F22) {
+        rt_kprintf("1f22");
+        printed = RT_TRUE;
+    }
+    if (diag->source_flags & LELY_RTT_NMT_CFG_SOURCE_APPLICATION_DCF) {
+        rt_kprintf("%sapp-dcf", printed ? "+" : "");
+        printed = RT_TRUE;
+    }
+    if (diag->source_flags & LELY_RTT_NMT_CFG_SOURCE_EXTERNAL_CFG_IND) {
+        rt_kprintf("%sexternal-cfg-ind", printed ? "+" : "");
+        printed = RT_TRUE;
+    }
+    if (!printed)
+        rt_kprintf("none");
+    if (diag->restore_requested)
+        rt_kprintf(" restore=1f8a");
+    if (diag->application_dcf_entries)
+        rt_kprintf(" entries=%u", (unsigned int)diag->application_dcf_entries);
+    if (diag->last_index) {
+        rt_kprintf(" last=%04x:%02x", (unsigned int)diag->last_index,
+                (unsigned int)diag->last_subindex);
+    }
+    rt_kprintf("\n");
+}
+
 static void
 lely_rtt_msh_cfg(const char *node_text, const char *timeout_text)
 {
     struct lely_rtt_nmt_cfg_result result;
+    struct lely_rtt_nmt_cfg_diagnostic diagnostic;
     lely_rtt_runtime_t *runtime;
     rt_uint32_t timeout_ms;
     rt_uint8_t node_id;
@@ -440,29 +499,33 @@ lely_rtt_msh_cfg(const char *node_text, const char *timeout_text)
     if (!runtime)
         return;
 
-    err = lely_rtt_runtime_nmt_configure(runtime, node_id, timeout_ms, &result);
+    err = lely_rtt_runtime_nmt_configure_ex(runtime, node_id, timeout_ms,
+            &result, &diagnostic);
     if (err != RT_EOK) {
         rt_kprintf("co: configuration request failed (%d)\n", err);
         return;
     }
 
     if (result.status == LELY_RTT_NMT_CFG_COMPLETION_OK) {
-        rt_kprintf("node %u: configuration ok\n", (unsigned int)node_id);
+        rt_kprintf("node %u: configuration ok", (unsigned int)node_id);
     } else if (result.status == LELY_RTT_NMT_CFG_COMPLETION_ABORT) {
-        rt_kprintf("node %u: configuration abort=0x%08x\n",
+        rt_kprintf("node %u: configuration abort=0x%08x",
                 (unsigned int)node_id, (unsigned int)result.abort_code);
     } else if (result.status == LELY_RTT_NMT_CFG_COMPLETION_CANCELED) {
         rt_kprintf("node %u: configuration canceled", (unsigned int)node_id);
         if (result.abort_code)
             rt_kprintf(" abort=0x%08x", (unsigned int)result.abort_code);
-        rt_kprintf("\n");
     } else {
         rt_kprintf("node %u: configuration local error=%d",
                 (unsigned int)node_id, result.local_error);
-        if (result.local_error == -RT_ENOSYS)
-            rt_kprintf(" (no supported 0x1F22/cfg_ind work; 0x1F8A restore unsupported)");
-        rt_kprintf("\n");
+        if (result.local_error == -RT_ENOSYS) {
+            if (diagnostic.restore_requested)
+                rt_kprintf(" (0x1F8A restore unsupported)");
+            else
+                rt_kprintf(" (no 0x1F22/app-dcf/external cfg_ind work)");
+        }
     }
+    lely_rtt_msh_cfg_print_diag(&diagnostic);
 }
 #endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
 
@@ -502,10 +565,24 @@ lely_rtt_msh_time(int argc, char **argv)
             rt_kprintf("time: no received TIME value\n");
         else if (err != RT_EOK)
             rt_kprintf("co: TIME snapshot failed (%d)\n", err);
-        else
-            rt_kprintf("time: unix=%lld.%09d seq=%u\n",
-                    (long long)value.seconds, (int)value.nanoseconds,
-                    (unsigned int)value.sequence);
+        else {
+            const rt_uint64_t seconds = (rt_uint64_t)value.seconds;
+            const unsigned int seconds_hi =
+                    (unsigned int)(seconds / 1000000000u);
+            const unsigned int seconds_lo =
+                    (unsigned int)(seconds % 1000000000u);
+
+            /* Avoid %ll: some RT-Thread BSPs omit long-long formatter support. */
+            if (seconds_hi)
+                rt_kprintf("time: unix=%u%09u.%09u seq=%u\n",
+                        seconds_hi, seconds_lo,
+                        (unsigned int)value.nanoseconds,
+                        (unsigned int)value.sequence);
+            else
+                rt_kprintf("time: unix=%u.%09u seq=%u\n", seconds_lo,
+                        (unsigned int)value.nanoseconds,
+                        (unsigned int)value.sequence);
+        }
         return;
     }
 
@@ -756,6 +833,118 @@ lely_rtt_msh_tpdo(int argc, char **argv)
         rt_kprintf("tpdo %u: event accepted\n", (unsigned int)pdo_number);
 }
 #endif /* defined(PKG_LELY_USING_MASTER_PDO_TX) */
+
+#if defined(PKG_LELY_USING_MASTER_SYNC_PDO)
+static void
+lely_rtt_msh_sync(int argc, char **argv)
+{
+    struct lely_rtt_sync_event event;
+    lely_rtt_runtime_t *runtime;
+    rt_uint32_t period_us;
+    rt_err_t err;
+
+    runtime = lely_rtt_msh_runtime();
+    if (!runtime)
+        return;
+
+    if (argc == 3 && !strcmp(argv[2], "status")) {
+        err = lely_rtt_runtime_get_sync(runtime, &event);
+        if (err == -RT_EBUSY) {
+            rt_kprintf("sync: no processed event\n");
+            return;
+        }
+        if (err != RT_EOK) {
+            rt_kprintf("co: SYNC status failed (%d)\n", err);
+            return;
+        }
+
+        rt_kprintf("sync: seq=%u counter=%u role=%s period-us=%u\n",
+                (unsigned int)event.sequence, (unsigned int)event.counter,
+                event.role == LELY_RTT_SYNC_ROLE_PRODUCER
+                        ? "producer" : "consumer",
+                (unsigned int)event.period_us);
+        return;
+    }
+
+    if (argc == 4 && !strcmp(argv[2], "period")
+            && lely_rtt_msh_parse_u32(argv[3], 0xffffffffu, &period_us)) {
+        err = lely_rtt_runtime_sync_set_period(runtime, period_us);
+        if (err != RT_EOK)
+            rt_kprintf("co: SYNC period update failed (%d)\n", err);
+        else
+            rt_kprintf("sync: period-us=%u\n", (unsigned int)period_us);
+        return;
+    }
+
+    rt_kprintf("co: SYNC command must be status or period <microseconds>\n");
+}
+
+static rt_bool_t
+lely_rtt_msh_pdo_direction(const char *text,
+        enum lely_rtt_pdo_direction *direction)
+{
+    if (!text || !direction)
+        return RT_FALSE;
+    if (!strcmp(text, "rx"))
+        *direction = LELY_RTT_PDO_DIRECTION_RPDO;
+    else if (!strcmp(text, "tx"))
+        *direction = LELY_RTT_PDO_DIRECTION_TPDO;
+    else
+        return RT_FALSE;
+    return RT_TRUE;
+}
+
+static void
+lely_rtt_msh_pdo(int argc, char **argv)
+{
+    enum lely_rtt_pdo_direction direction;
+    lely_rtt_runtime_t *runtime;
+    rt_uint32_t pdo_number;
+    rt_uint32_t transmission_type;
+    rt_uint8_t current;
+    rt_err_t err;
+
+    if ((argc != 5 && argc != 6) || strcmp(argv[2], "trans")
+            || !lely_rtt_msh_pdo_direction(argv[3], &direction)
+            || !lely_rtt_msh_parse_u32(argv[4], CO_NUM_PDOS, &pdo_number)
+            || !pdo_number) {
+        rt_kprintf("co: PDO command must be trans rx|tx <number> [type]\n");
+        return;
+    }
+
+    runtime = lely_rtt_msh_runtime();
+    if (!runtime)
+        return;
+
+    if (argc == 5) {
+        err = lely_rtt_runtime_pdo_get_transmission(runtime, direction,
+                (rt_uint16_t)pdo_number, &current);
+        if (err != RT_EOK)
+            rt_kprintf("co: PDO transmission query failed (%d)\n", err);
+        else
+            rt_kprintf("pdo %s %u: type=%u\n",
+                    direction == LELY_RTT_PDO_DIRECTION_RPDO ? "rx" : "tx",
+                    (unsigned int)pdo_number, (unsigned int)current);
+        return;
+    }
+
+    if (!lely_rtt_msh_parse_u32(argv[5], 0xffu, &transmission_type)
+            || (transmission_type > 0xf0u && transmission_type != 0xfeu
+                    && transmission_type != 0xffu)) {
+        rt_kprintf("co: PDO type must be 0..240, 254 or 255\n");
+        return;
+    }
+
+    err = lely_rtt_runtime_pdo_set_transmission(runtime, direction,
+            (rt_uint16_t)pdo_number, (rt_uint8_t)transmission_type);
+    if (err != RT_EOK)
+        rt_kprintf("co: PDO transmission update failed (%d)\n", err);
+    else
+        rt_kprintf("pdo %s %u: type=%u\n",
+                direction == LELY_RTT_PDO_DIRECTION_RPDO ? "rx" : "tx",
+                (unsigned int)pdo_number, (unsigned int)transmission_type);
+}
+#endif /* defined(PKG_LELY_USING_MASTER_SYNC_PDO) */
 
 #if defined(PKG_LELY_USING_MASTER_EMCY)
 /** @brief Convert one hexadecimal character to its numeric value. */
@@ -1068,6 +1257,16 @@ co(int argc, char **argv)
         return 0;
     }
 #endif /* defined(PKG_LELY_USING_MASTER_PDO_TX) */
+#if defined(PKG_LELY_USING_MASTER_SYNC_PDO)
+    if (argc >= 2 && !strcmp(argv[1], "sync")) {
+        lely_rtt_msh_sync(argc, argv);
+        return 0;
+    }
+    if (argc >= 2 && !strcmp(argv[1], "pdo")) {
+        lely_rtt_msh_pdo(argc, argv);
+        return 0;
+    }
+#endif /* defined(PKG_LELY_USING_MASTER_SYNC_PDO) */
 #if defined(PKG_LELY_USING_MASTER_EMCY)
     if (argc >= 2 && !strcmp(argv[1], "emcy")) {
         lely_rtt_msh_emcy(argc, argv);

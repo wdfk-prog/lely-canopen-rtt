@@ -224,6 +224,23 @@ Lely 的 `dcfgen` 用于根据 YAML 生成 CANopen Master DCF；本项目使用 
 ```text
 https://opensource.lely.com/canopen/docs/dcf-tools/
 ```
+
+`dcfgen` 还负责 Lely 官方的 concise DCF 生成：当某个 slave 需要配置 SDO（例如 YAML 中的 `sdo:`）时，它会额外输出 `<slave>.bin`，内容就是 Lely `co_csdo_dn_dcf_req()` 可消费的 SDO request 序列。这里不要和 `dcf2c` 混淆：`dcf2c` 的职责是 EDS/DCF -> `const struct co_sdev` C 源码，而不是生成这类 remote configuration `.bin`。
+
+B8 manual CFG 使用独立 Host 入口 `tools\gen_cfg_dcf.py`。脚本不重新实现 CANopen datatype 编码，而是在 staging 目录调用官方 `dcfgen`，只选择指定 slave 的 `.bin`，校验 entry count/index/sub-index/value-size framing，再生成 RT-Thread 可直接编译的 C/H。`dcfgen` 同时生成的 staging `master.dcf` 不会发布，因此不会把 manual-only application DCF 变成 Master OD 的 `0x1F22` 自动启动配置。Master+Node1 示例命令：
+
+```powershell
+.\.venv\Scripts\python.exe .\tools\gen_cfg_dcf.py `
+    --yml .\examples\master_node1\master_cfg.yml `
+    --node node1 `
+    --symbol master_node1_cfg_dcf `
+    --basename master_cfg_dcf `
+    --out-dir .\examples\master_node1 `
+    --expect-entries 1
+```
+
+如果已经单独得到 Lely concise DCF `.bin`，也可以使用 `--bin <file>` 跳过 `dcfgen` 调用，只做 framing 校验与 C/H 封装。
+
 #### 第 4 步：使用通用 `gen_sdev.ps1`
 
 Windows 主入口现在是：
@@ -255,7 +272,7 @@ tools\gen_sdev.ps1
 - `-OutDir`：输出目录，不存在时自动创建；
 - `-DcfFileName`：YAML 模式下保存生成 DCF 的文件名；省略时默认为 `<Name>.dcf`；
 - `-RemotePdo`：向 `dcfgen` 传递 `-r`；
-- `-CompactMaster`：对 `dcfgen` 的 Master DCF 做 MCU 裁剪，把 `0x1F22` concise DCF 文件引用物化成 inline DOMAIN 数据，并把 `master.bin` 中的静态 Master 初始化写入（例如 `0x1F87/0x1F88`）物化进 DCF；Master target 推荐始终启用；
+- `-CompactMaster`：对 `dcfgen` 的 Master DCF 做 MCU 内存裁剪；若 staging 中存在 `master.bin`，把受支持的 Master 本地初始化写入（`0x1018:04`、`0x1F55`、`0x1F87`、`0x1F88`）物化进 static DCF；同时拒绝 `UploadFile`/`DownloadFile` 这类 file-backed OD 值，因为 RT-Thread MCU 目标使用 `LELY_NO_CO_OBJ_FILE=1`；manual application concise DCF 应使用 `tools\gen_cfg_dcf.py`；Master target 推荐始终启用；
 - `-ErrorHistoryDepth`：`0x1003` error history 保留深度，默认 `8`；
 - `-MaxMasterSubObjects`：裁剪后估算 sub-object 总数上限，默认 `256`；超过时停止生成，避免再次把明显过大的 OD 带到 MCU；
 - `-NoStrings`：向 `dcf2c` 传递 `--no-strings`，不把可选对象/子对象名称复制到目标运行时 heap；
@@ -272,11 +289,13 @@ generated\master_node1\master_sdev.h
 generated\master_node1\master_sdev.meta
 ```
 
-`dcfgen` 本身固定生成名为 `master.dcf` 的完整 Master DCF，并在需要时额外生成 `master.bin` 与 `nodeN.bin`。通用脚本先在 staging 目录接收这些文件；启用 `-CompactMaster` 时，随后调用 `tools\compact_master_dcf.py` 把 `CompactSubObj` 的大范围收缩到当前网络实际需要的范围，把 `0x1F22:<node>` 的 `UploadFile=nodeN.bin` 读取并验证后改写成 DOMAIN `ParameterValue=<hex>`，并把 `master.bin` 中 `0x1018:04/0x1F55/0x1F87/0x1F88` 的静态初始化写入物化进 DCF。显式的 `0x1F22` Node-ID 子项也只保留到 `0x1F81` 中最高配置的远端 Node-ID。随后 `dcf2c` 生成静态 `co_sdev`；由于项目内置 Windows `dcf2c.exe` 可能把 inline DOMAIN `ParameterValue` 输出成 `.dom = NULL`，脚本再调用 `tools\materialize_sdev_domains.py` 按 compact DCF 校验/补齐 `CO_DOMAIN_C(...)` 与 `CO_OBJ_FLAGS_PARAMETER_VALUE`。这样最终 C 不依赖文件后端，满足 MCU 的 `LELY_NO_CO_OBJ_FILE=1`。原始完整 DCF、`master.bin` 和 `nodeN.bin` 只存在于 staging 目录，成功/失败后都会清理。脚本在 staging 中生成一份临时 YAML，把其中每个 `dcf:` 相对路径先按所选 YAML 所在目录解析为绝对路径，再交给 `dcfgen`。因此类似 `../node1/node1.dcf` 的输入不会依赖用户启动 PowerShell 或 Python 子进程的当前工作目录；仓库内原始 YAML 不会被改写。
+`dcfgen` 本身固定生成名为 `master.dcf` 的完整 Master DCF，并在需要初始化 Master 本地对象时额外生成 `master.bin`。例如 slave YAML 中的 `revision_number` / `serial_number` 会被 Lely 编码成对 `0x1F87:<node>` / `0x1F88:<node>` 的 concise-DCF 写入，而不是直接生成 `[1F87Value]` / `[1F88Value]` section。通用脚本先在 staging 目录接收这些文件；启用 `-CompactMaster` 时，把存在的 `master.bin` 传给 `tools\compact_master_dcf.py`，先将受支持的 Master 初始化写入物化到 DCF，再把 `CompactSubObj` 的大范围收缩到当前网络实际需要的范围，最后按 `-DcfFileName` 发布。原始完整 DCF 和 `master.bin` 只存在于 staging 目录，成功/失败后都会清理。脚本在 staging 中生成一份临时 YAML，把其中每个 `dcf:` 相对路径先按所选 YAML 所在目录解析为绝对路径，再交给 `dcfgen`。因此类似 `../node1/node1.dcf` 的输入不会依赖用户启动 PowerShell 或 Python 子进程的当前工作目录；仓库内原始 YAML 不会被改写。
 
-当前裁剪规则只改变 Host 生成 DCF 的表示和展开规模，不修改 `master.yml` 中的产品策略：Node-ID、heartbeat multiplier、mandatory、自动 NMT Start/Reset Communication 等仍由 YAML 决定。对于 Node-ID 索引的 Manager 对象以及显式 `0x1F22` 数组，裁剪器保留到当前 `0x1F81` 中最高配置的远端 Node-ID；`0x1003` 单独使用 `-ErrorHistoryDepth`。`0x1F22` 的 concise DCF 二进制结构会在 Host 端校验完整性后内联；缺文件、截断、声明长度不匹配或越出 staging 目录都会直接失败。如果裁剪后估算 sub-object 数仍超过 `-MaxMasterSubObjects`，生成流程 fail closed，不发布新的 `master.dcf/master_sdev.c`。
+当前裁剪规则不修改 `master.yml` 的产品策略：Node-ID、heartbeat multiplier、mandatory、自动 NMT Start/Reset Communication、revision/serial identity expectation 等仍由 YAML 决定。对于 Node-ID 索引的 Manager 对象，裁剪器保留到当前 `0x1F81` 中最高配置的远端 Node-ID；`0x1003` 单独使用 `-ErrorHistoryDepth`。`master.bin` 只允许物化当前 static Master OD 明确支持的 `0x1018:04`、`0x1F55`、`0x1F87`、`0x1F88` UNSIGNED32 写入；出现其他 entry、错误长度或越界 sub-index 时直接失败，避免静默改变启动策略。另一方面，因为 MCU 固件关闭对象文件后端，`-CompactMaster` 遇到任何 `UploadFile`/`DownloadFile` 仍会在 `dcf2c` 前直接失败；它不会把 `<slave>.bin` 隐式物化到 Master OD。需要 manual remote configuration 时使用前面的 `gen_cfg_dcf.py` 独立生成 application concise DCF。若产品确实需要 static Master OD 中的 embedded `0x1F22`，输入本身必须已经是 inline/static DOMAIN，而不能依赖目标端文件路径。如果裁剪后估算 sub-object 数仍超过 `-MaxMasterSubObjects`，生成流程同样 fail closed，不发布新的 `master.dcf/master_sdev.c`。
 
-最终发布同样 fail closed：`gen_sdev.ps1` 会在替换第一个正式产物前先备份本次所有目标文件，随后发布 C/H/DCF/META；任一替换失败都会恢复整组旧文件，避免出现“新 C + 旧 DCF/META”的混合 generation。对于 `-CompactMaster`，脚本会先把 `master.bin` 初始化值物化进 DCF，再校验/补齐 C 中的 inline DOMAIN，并检查是否残留 `CO_OBJ_FLAGS_UPLOAD_FILE/CO_OBJ_FLAGS_DOWNLOAD_FILE`；任一环节不一致都拒绝发布。META 中的输入/DCF/SDEV SHA-256 统一按文本换行归一化为 LF 后计算，并写入 `HASH_MODE=LF_NORMALIZED_TEXT`，所以 Git 的 CRLF/LF 转换不会改变这些 provenance hash。
+`dcf2c` 生成 C 后，`gen_sdev.ps1` 会调用 `tools\normalize_sdev_compact_defaults.py`，按 compact DCF 父对象的 `DefaultValue` 校正生成 sub-object 的 `.def`，但不改变 `.val` 当前值。这样类似 `0x1028:01` 的 `DefaultValue=0x80000000` 与当前 `ParameterValue=0x00000081` 会继续保持为两个不同语义。随后脚本再次扫描生成 C，若仍出现 `CO_OBJ_FLAGS_UPLOAD_FILE` 或 `CO_OBJ_FLAGS_DOWNLOAD_FILE` 就拒绝发布。
+
+最终发布同样 fail closed：`gen_sdev.ps1` 会在替换第一个正式产物前先备份本次所有目标文件，随后发布 C/H/DCF/META；任一替换失败都会恢复整组旧文件，避免出现“新 C + 旧 DCF/META”的混合 generation。META 中的输入/DCF/SDEV SHA-256 统一按文本换行归一化为 LF 后计算，并写入 `HASH_MODE=LF_NORMALIZED_TEXT`，所以 Git 的 CRLF/LF 转换不会改变这些 provenance hash。
 
 **模式 B：已有 DCF -> C/H**
 
@@ -362,12 +381,12 @@ Master + Node1 不再有专用 wrapper。要刷新仓库内示例，直接在项
 
 这条命令就是 Master + Node1 示例的唯一生成入口：
 
-- `master.dcf`：由 `dcfgen -r` 生成后先经过 MCU-safe 裁剪，并物化 `nodeN.bin/master.bin` 的静态数据；
-- `master_sdev.c`：由裁剪后的 DCF 经 `dcf2c --no-strings` 生成，再按 compact DCF 校验/补齐 fileless DOMAIN；
+- `master.dcf`：由 `dcfgen -r` 生成后先经过 MCU-safe 裁剪；
+- `master_sdev.c`：由裁剪后的 DCF 经 `dcf2c --no-strings` 生成，再按 DCF `DefaultValue` 校正 compact sub-object 的 `.def`；
 - `master_sdev.meta`：由通用脚本记录生成输入/输出 hash 和关键选项；hash 使用 `HASH_MODE=LF_NORMALIZED_TEXT`，因此 CRLF/LF checkout 不会改变 provenance；
 - `master_sdev.h`：因为指定 `-NoHeader`，继续使用仓库内项目维护版本，不被覆盖。
 
-正常输出中必须先看到 `0x1F87:01`/`0x1F88:01` 的 `materialized from master.bin`、`0x1F22:01: embedded node1.bin (...)`、`0x1F22:01: materialized/verified static DOMAIN (...)` 和 `Master DCF footprint estimate:`，再看到 `Generated C/DCF/META`。任一关键 materialize/embed/footprint 行缺失时不要继续拿生成物做 MCU build。
+Master+Node1 当前 YAML 指定 `revision_number=1` 与 `serial_number=1`，因此正常输出中应看到 `0x1F87:01: materialized from master.bin`、`0x1F88:01: materialized from master.bin` 和 `Master DCF footprint estimate:`；随后 compact default 校验必须成功，并且不能出现 unsupported `master.bin` entry 或 file-backed OD 拒绝信息，最后才应看到 `Generated C/DCF/META`。缺少上述 identity materialization/footprint 行或任一 fail-closed 检查失败时，不要继续拿生成物做 MCU build。
 
 #### 第 6 步：确认 Master + Node1 示例结果
 
@@ -376,10 +395,6 @@ Get-Item .\examples\master_node1\master.dcf
 Get-Item .\examples\master_node1\master_sdev.c
 Get-Content .\examples\master_node1\master_sdev.meta
 Select-String -Path .\examples\master_node1\master_sdev.c -Pattern "const struct co_sdev master_sdev"
-Select-String -Path .\examples\master_node1\master.dcf -Pattern `
-    "SubNumber=2", "ParameterValue=01000000002000040000005A5AA5A5", "UploadFile="
-Select-String -Path .\examples\master_node1\master_sdev.c -Pattern `
-    "CO_DOMAIN_C", "CO_OBJ_FLAGS_UPLOAD_FILE", "node1.bin"
 ```
 
 如果项目本身在 Git 仓库中，再检查生成 diff：

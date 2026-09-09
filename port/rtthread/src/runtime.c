@@ -6,14 +6,9 @@
  * 2026-09-03     wdfk-prog         first version
  * 2026-09-04     wdfk-prog         add owner CANopen node and command ingress
  * 2026-09-05     wdfk-prog         correct B4 role to a local NMT Master
- * 2026-09-05     wdfk-prog         integrate Master command and SDO ingress
- * 2026-09-05     wdfk-prog         integrate configuration, local OD and TIME bridges
  * 2026-09-06     wdfk-prog         retire CFG requests at local NMT barriers
- * 2026-09-06     wdfk-prog         bind B6 EMCY bridge to NMT service lifetime
- * 2026-09-06     wdfk-prog         sync passive timer clock before owner work
- * 2026-09-06     wdfk-prog         preserve synchronous boot completion snapshot
  * 2026-09-07     wdfk-prog         preserve boot completion in remote state snapshot
- * 2026-09-07     wdfk-prog         order queued RX before command-time network sync
+ * 2026-09-08     wdfk-prog         ignore stale outer BOOTUP after synchronous boot completion
  */
 
 /**
@@ -126,6 +121,9 @@ lely_rtt_master_snapshots_reset(struct lely_rtt_runtime *runtime)
 #if defined(PKG_LELY_USING_MASTER_TIME)
     lely_rtt_master_time_reset(runtime);
 #endif /* defined(PKG_LELY_USING_MASTER_TIME) */
+#if defined(PKG_LELY_USING_MASTER_SYNC_PDO)
+    lely_rtt_master_sync_reset(runtime);
+#endif /* defined(PKG_LELY_USING_MASTER_SYNC_PDO) */
 }
 
 /**
@@ -204,21 +202,21 @@ lely_rtt_master_state_ind(co_nmt_t *nmt, co_unsigned8_t id,
     if (!id || id > CO_NUM_NODES)
         return;
 
-#if defined(PKG_LELY_USING_MASTER_SDO)
-    /* Apply the post-NMT state gate after Lely default processing. */
-    lely_rtt_master_sdo_on_nmt_state(runtime, id, state);
-#endif /* defined(PKG_LELY_USING_MASTER_SDO) */
-
     /*
      * co_nmt_on_st() may complete Boot synchronously. BOOTUP cleared the old
-     * result before the chain, so a valid result here is necessarily the fresh
-     * completion whose callback already published the authoritative final
-     * remote state. Do not overwrite that state with this outer BOOTUP event.
+     * result before the chain, so a valid result here is the fresh completion.
+     * boot_ind already finalized the remote snapshot, Boot result and SDO gate;
+     * replaying this outer BOOTUP could reopen a fail-closed SDO state.
      */
     if (state == CO_NMT_ST_BOOTUP
             && ((rt_uint32_t)rt_atomic_load(&runtime->remote_boot_result[id])
                     & LELY_RTT_REMOTE_BOOT_VALID))
         return;
+
+#if defined(PKG_LELY_USING_MASTER_SDO)
+    /* Apply the post-NMT state gate after Lely default processing. */
+    lely_rtt_master_sdo_on_nmt_state(runtime, id, state);
+#endif /* defined(PKG_LELY_USING_MASTER_SDO) */
 
     rt_atomic_store(&runtime->remote_nmt_state[id],
             lely_rtt_remote_state_pack(state, state, RT_FALSE));
@@ -353,6 +351,33 @@ lely_rtt_master_init(struct lely_rtt_runtime *runtime)
             &lely_rtt_master_boot_ind, runtime);
 #endif /* !LELY_NO_CO_NMT_BOOT */
 
+#if defined(PKG_LELY_USING_MASTER_NMT_CFG)
+    {
+        /* Bind before local reset can launch any Lely configuration activity. */
+        rt_err_t err = lely_rtt_master_cfg_bind(runtime);
+
+        if (err != RT_EOK) {
+            LELY_RTT_LOG_E("NMT configuration bridge bind failed: %d", err);
+            return err;
+        }
+    }
+#endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
+#if defined(PKG_LELY_USING_MASTER_SYNC_PDO)
+    {
+        /*
+         * Register at the NMT level before RESET_NODE. Lely creates the active
+         * SYNC service only while entering Pre-operational, so requiring
+         * co_nmt_get_sync() here would reject every normal startup.
+         */
+        rt_err_t err = lely_rtt_master_sync_bind(runtime);
+
+        if (err != RT_EOK) {
+            LELY_RTT_LOG_E("SYNC/PDO bridge bind failed: %d", err);
+            return err;
+        }
+    }
+#endif /* defined(PKG_LELY_USING_MASTER_SYNC_PDO) */
+
     if (co_nmt_cs_ind(runtime->master_nmt, CO_NMT_CS_RESET_NODE) == -1) {
         LELY_RTT_LOG_E("CANopen Master local reset-node failed");
         return -RT_ERROR;
@@ -361,6 +386,17 @@ lely_rtt_master_init(struct lely_rtt_runtime *runtime)
         LELY_RTT_LOG_E("configured local CANopen device is not an NMT Master");
         return -RT_ERROR;
     }
+#if defined(PKG_LELY_USING_MASTER_SYNC_PDO)
+    /*
+     * RESET_NODE runs Lely's local state transition synchronously through
+     * service setup. Validate co_sync here, after pre-reset callback ownership
+     * registration, so creation failure remains a startup error.
+     */
+    if (!co_nmt_get_sync(runtime->master_nmt)) {
+        LELY_RTT_LOG_E("SYNC bridge enabled but SYNC service is unavailable");
+        return -RT_ERROR;
+    }
+#endif /* defined(PKG_LELY_USING_MASTER_SYNC_PDO) */
 
 #if defined(PKG_LELY_USING_LOCAL_OD)
     {
@@ -415,6 +451,9 @@ lely_rtt_master_fini(struct lely_rtt_runtime *runtime)
         return;
 
     if (runtime->master_nmt) {
+#if defined(PKG_LELY_USING_MASTER_SYNC_PDO)
+        lely_rtt_master_sync_unbind(runtime);
+#endif /* defined(PKG_LELY_USING_MASTER_SYNC_PDO) */
 #if defined(PKG_LELY_USING_LOCAL_OD)
         lely_rtt_local_od_unbind(runtime);
 #endif /* defined(PKG_LELY_USING_LOCAL_OD) */
@@ -775,6 +814,8 @@ lely_rtt_owner_entry(void *parameter)
          */
         lely_rtt_drain_loop(runtime);
         lely_rtt_timer_sync_can_net(runtime);
+        if (runtime->runtime_error != RT_EOK)
+            break;
 
         /*
          * Drain one bounded command batch on every owner iteration. COMMAND
@@ -793,6 +834,9 @@ lely_rtt_owner_entry(void *parameter)
             lely_rtt_can_process_status(runtime);
 
         lely_rtt_drain_loop(runtime);
+#if defined(PKG_LELY_USING_MASTER_NMT_CFG)
+        lely_rtt_master_cfg_reap(runtime);
+#endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
 #if defined(PKG_LELY_USING_MASTER_SDO)
         lely_rtt_master_sdo_reap(runtime);
 #endif /* defined(PKG_LELY_USING_MASTER_SDO) */
@@ -1142,6 +1186,10 @@ lely_rtt_runtime_destroy(lely_rtt_runtime_t *runtime)
     }
 
     runtime->master_sdev = RT_NULL;
+#if defined(PKG_LELY_USING_MASTER_NMT_CFG)
+    /* owner_thread == NULL is the final callback barrier for copied sources. */
+    lely_rtt_master_cfg_sources_fini(runtime);
+#endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
 
     if (runtime->event_initialized) {
         rt_event_detach(&runtime->event);

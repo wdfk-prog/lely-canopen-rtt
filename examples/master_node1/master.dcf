@@ -59,7 +59,7 @@ SupportedObjects=3
 3=0x1018
 
 [OptionalObjects]
-SupportedObjects=31
+SupportedObjects=30
 1=0x1003
 2=0x1005
 3=0x1006
@@ -78,19 +78,18 @@ SupportedObjects=31
 16=0x1600
 17=0x1800
 18=0x1A00
-19=0x1F22
-20=0x1F25
-21=0x1F55
-22=0x1F80
-23=0x1F81
-24=0x1F82
-25=0x1F84
-26=0x1F85
-27=0x1F86
-28=0x1F87
-29=0x1F88
-30=0x1F89
-31=0x1F8A
+19=0x1F25
+20=0x1F55
+21=0x1F80
+22=0x1F81
+23=0x1F82
+24=0x1F84
+25=0x1F85
+26=0x1F86
+27=0x1F87
+28=0x1F88
+29=0x1F89
+30=0x1F8A
 
 [ManufacturerObjects]
 SupportedObjects=6
@@ -349,27 +348,10 @@ CompactSubObj=1
 NrOfEntries=1
 1=0x22000120
 
-[1F22]
-SubNumber=2
-ParameterName=Concise DCF
-ObjectType=0x08
-
-[1F22sub0]
-ParameterName=Highest sub-index supported
-DataType=0x0005
-AccessType=const
-DefaultValue=1
-
-[1F22sub1]
-ParameterName=Node-ID 1
-DataType=0x000F
-AccessType=ro
-ParameterValue=01000000002000040000005A5AA5A5
-
 [1F25]
 ParameterName=Configuration request
 ObjectType=0x08
-DataType=0x0005
+DataType=0x0007
 AccessType=wo
 CompactSubObj=1
 

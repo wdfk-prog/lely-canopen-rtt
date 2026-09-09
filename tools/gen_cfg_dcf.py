@@ -1,0 +1,374 @@
+#!/usr/bin/env python3
+"""Generate embeddable C/H from a Lely concise-DCF binary.
+
+The preferred YAML mode delegates CANopen datatype encoding and SDO request
+construction to Lely's official ``dcfgen`` tool, then embeds only the selected
+slave ``.bin`` output. The staging ``master.dcf`` is deliberately discarded so
+this helper does not turn application-only manual configuration into object
+0x1F22 automatic boot configuration.
+"""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass
+import os
+from pathlib import Path
+import re
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+from typing import List, Optional
+
+
+C_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+NODE_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
+
+
+@dataclass(frozen=True)
+class ConciseEntry:
+    index: int
+    sub_index: int
+    value: bytes
+
+
+def _load_u32(data: bytes, offset: int) -> int:
+    return struct.unpack_from("<I", data, offset)[0]
+
+
+def parse_concise_dcf(data: bytes) -> List[ConciseEntry]:
+    """Validate the framing consumed by Lely co_csdo_dn_dcf_req()."""
+    if len(data) < 4:
+        raise ValueError("concise DCF is shorter than the 32-bit entry count")
+
+    count = _load_u32(data, 0)
+    if count == 0:
+        raise ValueError("concise DCF contains zero entries")
+
+    entries: List[ConciseEntry] = []
+    offset = 4
+    for entry_no in range(1, count + 1):
+        if len(data) - offset < 7:
+            raise ValueError(f"entry {entry_no} header is truncated")
+
+        index, sub_index, value_size = struct.unpack_from("<HBI", data, offset)
+        offset += 7
+        if value_size > len(data) - offset:
+            raise ValueError(
+                f"entry {entry_no} value is truncated: need {value_size} bytes, "
+                f"have {len(data) - offset}"
+            )
+
+        value = data[offset : offset + value_size]
+        offset += value_size
+        entries.append(ConciseEntry(index, sub_index, value))
+
+    if offset != len(data):
+        raise ValueError(f"concise DCF has {len(data) - offset} trailing byte(s)")
+
+    return entries
+
+
+def _resolve_executable(requested: Optional[str], project_root: Path) -> str:
+    candidates: List[str] = []
+    if requested:
+        candidates.append(requested)
+    elif os.environ.get("DCFGEN"):
+        candidates.append(os.environ["DCFGEN"])
+    else:
+        candidates.extend(
+            [
+                str(project_root / ".venv" / "Scripts" / "dcfgen.exe"),
+                str(project_root / ".venv" / "bin" / "dcfgen"),
+                "dcfgen.exe",
+                "dcfgen",
+            ]
+        )
+
+    for candidate in candidates:
+        path = Path(candidate).expanduser()
+        if path.is_file():
+            return str(path.resolve())
+        resolved = shutil.which(candidate)
+        if resolved:
+            return resolved
+
+    raise FileNotFoundError(
+        "Lely dcfgen was not found. Install the project-pinned dcf-tools "
+        "environment or pass --dcfgen <path>."
+    )
+
+
+def generate_with_dcfgen(
+    yml: Path,
+    node: str,
+    dcfgen: str,
+    *,
+    no_strict: bool,
+    verbose: bool,
+) -> bytes:
+    """Run official Lely dcfgen in staging and return one slave .bin."""
+    if not yml.is_file():
+        raise FileNotFoundError(f"YAML input not found: {yml}")
+    if not NODE_NAME_RE.fullmatch(node) or node.startswith("."):
+        raise ValueError("--node must be a normal dcfgen slave section name")
+
+    with tempfile.TemporaryDirectory(prefix="lely-cfg-dcf-") as stage:
+        args = [dcfgen, "-d", stage]
+        if no_strict:
+            args.append("-S")
+        if verbose:
+            args.append("-v")
+        args.append(yml.name)
+
+        print(f"dcfgen   : {dcfgen}")
+        print(f"input    : {yml}")
+        # dcfgen resolves each slave `dcf:` path against its process CWD.
+        subprocess.run(args, cwd=yml.parent, check=True)
+
+        concise_path = Path(stage) / f"{node}.bin"
+        if not concise_path.is_file() or concise_path.stat().st_size == 0:
+            raise FileNotFoundError(
+                f"dcfgen did not produce a non-empty {node}.bin; "
+                "ensure the selected slave has at least one configuration SDO"
+            )
+        return concise_path.read_bytes()
+
+
+def _format_bytes(data: bytes, indent: str = "    ") -> List[str]:
+    if not data:
+        return [indent + "/* empty value */"]
+    result = []
+    for start in range(0, len(data), 12):
+        chunk = data[start : start + 12]
+        result.append(indent + ", ".join(f"0x{byte:02x}" for byte in chunk) + ",")
+    return result
+
+
+def render_source(
+    basename: str,
+    symbol: str,
+    entries: List[ConciseEntry],
+    source_label: str,
+) -> str:
+    lines = [
+        "/*",
+        " * SPDX-License-Identifier: Apache-2.0",
+        " *",
+        " * Generated by tools/gen_cfg_dcf.py. Do not edit manually.",
+        " */",
+        "",
+        "/**",
+        f" * @file {basename}.c",
+        " * @brief Embedded application concise DCF generated on the Host.",
+        " */",
+        "",
+        f'#include "{basename}.h"',
+        "",
+        f"/* Configuration source: {source_label}. */",
+        f"const rt_uint8_t {symbol}[] = {{",
+    ]
+
+    lines.extend(_format_bytes(struct.pack("<I", len(entries))))
+    lines[-1] += f" /* Entry count = {len(entries)}. */"
+
+    for entry_no, entry in enumerate(entries, 1):
+        lines.append(
+            f"    /* Entry {entry_no}: 0x{entry.index:04x}:{entry.sub_index:02x}, "
+            f"{len(entry.value)} byte(s). */"
+        )
+        header = struct.pack("<HBI", entry.index, entry.sub_index, len(entry.value))
+        lines.extend(_format_bytes(header))
+        lines.extend(_format_bytes(entry.value))
+
+    lines.extend(
+        [
+            "};",
+            "",
+            f"const rt_size_t {symbol}_size = sizeof({symbol});",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def render_header(basename: str, symbol: str) -> str:
+    guard = f"LELY_GENERATED_{basename.upper()}_H_"
+    return "\n".join(
+        [
+            "/*",
+            " * SPDX-License-Identifier: Apache-2.0",
+            " *",
+            " * Generated by tools/gen_cfg_dcf.py. Do not edit manually.",
+            " */",
+            "",
+            "/**",
+            f" * @file {basename}.h",
+            " * @brief Declaration for a Host-generated application concise DCF.",
+            " */",
+            "",
+            f"#ifndef {guard}",
+            f"#define {guard}",
+            "",
+            "#include <rtthread.h>",
+            "",
+            "/** Host-generated concise DCF bytes for manual configuration. */",
+            f"extern const rt_uint8_t {symbol}[];",
+            "/** Number of bytes in the generated concise DCF. */",
+            f"extern const rt_size_t {symbol}_size;",
+            "",
+            f"#endif /* {guard} */",
+            "",
+        ]
+    )
+
+
+def _crlf_ascii(text: str) -> bytes:
+    return text.replace("\r\n", "\n").replace("\n", "\r\n").encode("ascii")
+
+
+def publish_pair(out_dir: Path, basename: str, source: str, header: str) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    final_c = out_dir / f"{basename}.c"
+    final_h = out_dir / f"{basename}.h"
+    temp_c = out_dir / f".{basename}.c.tmp"
+    temp_h = out_dir / f".{basename}.h.tmp"
+
+    old_c = final_c.read_bytes() if final_c.exists() else None
+    old_h = final_h.read_bytes() if final_h.exists() else None
+    published_c = False
+    try:
+        temp_c.write_bytes(_crlf_ascii(source))
+        temp_h.write_bytes(_crlf_ascii(header))
+        os.replace(temp_c, final_c)
+        published_c = True
+        os.replace(temp_h, final_h)
+    except Exception:
+        if published_c:
+            if old_c is None:
+                final_c.unlink(missing_ok=True)
+            else:
+                final_c.write_bytes(old_c)
+        if old_h is None:
+            final_h.unlink(missing_ok=True)
+        else:
+            final_h.write_bytes(old_h)
+        raise
+    finally:
+        temp_c.unlink(missing_ok=True)
+        temp_h.unlink(missing_ok=True)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--bin", type=Path, help="existing Lely concise-DCF .bin")
+    source.add_argument("--yml", type=Path, help="dcfgen YAML input")
+    parser.add_argument(
+        "--node",
+        help="slave section name whose <node>.bin is selected in --yml mode",
+    )
+    parser.add_argument("--symbol", required=True, help="C array symbol")
+    parser.add_argument(
+        "--basename",
+        help="output C/H basename (default: --symbol)",
+    )
+    parser.add_argument("--out-dir", required=True, type=Path, help="output directory")
+    parser.add_argument("--dcfgen", help="path or command name for Lely dcfgen")
+    parser.add_argument(
+        "--no-strict",
+        action="store_true",
+        help="pass -S to dcfgen in YAML mode",
+    )
+    parser.add_argument(
+        "--verbose-dcfgen",
+        action="store_true",
+        help="pass -v to dcfgen in YAML mode",
+    )
+    parser.add_argument(
+        "--label",
+        help="stable configuration-source label embedded in the generated C file",
+    )
+    parser.add_argument(
+        "--expect-entries",
+        type=int,
+        help="fail unless the generated concise DCF has exactly this many entries",
+    )
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    project_root = Path(__file__).resolve().parent.parent
+
+    if not C_IDENTIFIER_RE.fullmatch(args.symbol):
+        print("error: --symbol must be a valid C identifier", file=sys.stderr)
+        return 2
+    basename = args.basename or args.symbol
+    if not C_IDENTIFIER_RE.fullmatch(basename):
+        print("error: --basename must be a valid C identifier", file=sys.stderr)
+        return 2
+    if args.expect_entries is not None and args.expect_entries <= 0:
+        print("error: --expect-entries must be greater than zero", file=sys.stderr)
+        return 2
+    if args.label and (len(args.label) > 80 or "\n" in args.label
+            or "\r" in args.label or "*/" in args.label):
+        print("error: --label must be a single safe C-comment fragment <= 80 characters",
+              file=sys.stderr)
+        return 2
+    if args.bin and (args.dcfgen or args.no_strict or args.verbose_dcfgen):
+        print("error: dcfgen options are only valid with --yml", file=sys.stderr)
+        return 2
+
+    try:
+        if args.yml:
+            if not args.node:
+                raise ValueError("--node is required with --yml")
+            yml = args.yml.expanduser().resolve()
+            dcfgen = _resolve_executable(args.dcfgen, project_root)
+            data = generate_with_dcfgen(
+                yml,
+                args.node,
+                dcfgen,
+                no_strict=args.no_strict,
+                verbose=args.verbose_dcfgen,
+            )
+            source_label = args.label or f"{yml.name}; slave section {args.node}"
+        else:
+            if args.node:
+                raise ValueError("--node is only valid with --yml")
+            bin_path = args.bin.expanduser().resolve()
+            if not bin_path.is_file():
+                raise FileNotFoundError(f"concise DCF input not found: {bin_path}")
+            data = bin_path.read_bytes()
+            source_label = args.label or bin_path.name
+
+        entries = parse_concise_dcf(data)
+        if args.expect_entries is not None and len(entries) != args.expect_entries:
+            raise ValueError(
+                f"expected {args.expect_entries} concise-DCF entries, got {len(entries)}"
+            )
+
+        source = render_source(basename, args.symbol, entries, source_label)
+        header = render_header(basename, args.symbol)
+        publish_pair(args.out_dir.expanduser().resolve(), basename, source, header)
+    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"entries  : {len(entries)}")
+    print(f"bytes    : {len(data)}")
+    for entry in entries:
+        print(
+            f"entry    : 0x{entry.index:04x}:{entry.sub_index:02x} "
+            f"size={len(entry.value)}"
+        )
+    print(f"output   : {args.out_dir / (basename + '.c')}")
+    print(f"output   : {args.out_dir / (basename + '.h')}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

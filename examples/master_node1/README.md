@@ -44,12 +44,122 @@ checked-in OD contains Master RPDO1 (`0x1400/0x1600`) mapped to local
 mapped from local `0x2200:01` to Node1 RPDO1 (`0x201`). Remote mapping metadata
 is retained at `0x5800/0x5A00` and `0x5C00/0x5E00`. B5.2 applications update
 `0x2200:01` through the owner-safe local OD API and then call
-`lely_rtt_runtime_tpdo_event(runtime, 1)` (or `co tpdo event 1`).
+`lely_rtt_runtime_tpdo_event(runtime, 1)` (or `co tpdo event 1`). B9 can switch
+these same local PDOs to synchronous transmission at runtime without changing
+the shared DCF/SDEV defaults.
 
 Node1 also exposes EMCY at `0x081`; the Master `0x1028:01` consumer entry is
 configured for that COB-ID. With the B6 bridge enabled, `co emcy` or
 `co emcy 1` reads the bounded remote EMCY history without exposing Lely objects
 to non-owner threads.
+
+## SYNC and synchronous PDO example
+
+Enable `PKG_LELY_USING_MASTER_SYNC_PDO` together with the existing Master+Node1
+example. The shared checked-in DCF/SDEV deliberately keeps its pre-B9 defaults:
+object `0x1006` is zero and RPDO1/TPDO1 remain event-driven type 255. This
+preserves the existing B5.2 example when B9 is disabled. The Master OD already
+contains SYNC producer object `0x1005`, so B9 can opt into a real synchronous
+cycle at runtime without replacing or remapping the generated OD.
+
+Use the owner-safe controls to enter synchronous mode explicitly:
+
+```text
+co sync period 1000000
+co pdo trans rx 1 1
+co pdo trans tx 1 1
+co sync status
+```
+
+After these commands the local Master produces SYNC every 1,000,000 us, TPDO1
+uses cyclic synchronous transmission type 1, and RPDO1 applies received Node1
+TPDO data at the synchronous boundary. Node1 remains event-driven in this shared
+fixture so the pre-B9 B5.2 smoke path is unchanged; a product that requires the
+remote node itself to participate synchronously should configure that node's
+SYNC consumer and PDO communication parameters through its normal device
+configuration flow.
+
+Lely handles each local SYNC in owner-thread order: synchronous TPDOs are
+sampled/transmitted first, synchronous RPDO data is then committed to the local
+OD, and only afterwards does B9 publish its application SYNC
+indication/snapshot. `co sync status` therefore observes a post-PDO boundary
+rather than a pre-PDO notification.
+
+The same controls are available to product code through
+`lely_rtt_runtime_sync_set_period()`,
+`lely_rtt_runtime_pdo_get_transmission()` and
+`lely_rtt_runtime_pdo_set_transmission()`. These calls update the active Lely
+service through the owner queue; they do not perform dynamic PDO remapping.
+
+Transmission type 0 is supported for TPDO event-on-next-SYNC behavior. After
+setting TPDO1 to type 0, update its mapped OD value and call
+`lely_rtt_runtime_tpdo_event(runtime, 1)`; the event is armed immediately but
+the PDO is sampled and sent only when the next SYNC is processed. Types 1..240
+are cyclic synchronous and are driven only by SYNC. Types 254/255 preserve the
+existing event-driven behavior. RTR-only/reserved types remain outside B9.
+
+The optional callback registered by `lely_rtt_runtime_configure_sync_ind()` runs
+in the Lely owner thread after the synchronous PDO work. The registration
+persists across stop/start cycles until reconfigured or the runtime is destroyed.
+Keep the callback and its data alive for that lifetime, keep the callback bounded
+and non-blocking, and do not call a runtime API that waits for owner completion.
+For application threads that only need observation, prefer
+`lely_rtt_runtime_get_sync()` and the local-OD snapshot/read APIs.
+
+## Manual NMT configuration example
+
+When both `PKG_LELY_EXAMPLE_MASTER_NODE1` and
+`PKG_LELY_USING_MASTER_NMT_CFG` are enabled, the target also builds
+`master_cfg_dcf.c`. Its concise DCF contains one real remote write:
+`0x1017:00 = 1000` (`UNSIGNED16`), matching Node1's heartbeat-producer
+configuration. The auto-init path copies this data into the runtime before the
+owner thread starts. Product code that creates a runtime explicitly can use the
+same order:
+
+```c
+lely_rtt_runtime_configure_master(runtime, &master_sdev);
+lely_rtt_runtime_configure_nmt_dcf(runtime, 1,
+        master_node1_cfg_dcf, master_node1_cfg_dcf_size);
+lely_rtt_runtime_start(runtime);
+```
+
+After the runtime is started, `co cfg 1 1000` enters the existing owner queue
+and `co_nmt_cfg_req()` path. Lely first executes any 0x1F22 data present in the
+Master OD; its application `cfg_ind` stage then executes the copied concise DCF
+through the same configuration-owned Client-SDO and completes it with
+`co_nmt_cfg_res()`. The checked-in Master OD still has no 0x1F22 object, so this
+example exercises the application `cfg_ind` branch directly.
+
+The copied application DCF is deliberately manual-only. Automatic NMT boot or
+other Lely configuration activity reaches the installed callback but does not
+consume this application source unless a manual RT-Thread CFG request currently
+owns that Node-ID. This keeps the existing startup policy unchanged.
+
+The checked-in `master_cfg_dcf.c/.h` are generated Host artifacts. Lely's
+official `dcfgen` performs the CANopen-aware SDO encoding from the dedicated
+`master_cfg.yml` and produces a staging `node1.bin`; `tools/gen_cfg_dcf.py`
+validates that concise DCF and embeds it as the C array used by the RT-Thread
+example. The staging `master.dcf` is discarded, so this generation path does not
+populate object 0x1F22 or change automatic boot behavior. Regenerate from the
+repository root on the Windows Host with:
+
+```powershell
+.\.venv\Scripts\python.exe .\tools\gen_cfg_dcf.py `
+    --yml .\examples\master_node1\master_cfg.yml `
+    --node node1 `
+    --symbol master_node1_cfg_dcf `
+    --basename master_cfg_dcf `
+    --out-dir .\examples\master_node1 `
+    --expect-entries 1
+```
+
+The generator also accepts `--bin <file>` when a concise DCF has already been
+produced by `dcfgen`. Do not hand-edit the generated C/H bytes.
+
+MSH reports the terminal classification together with `stage`, `source`, entry
+count and the last application DCF object when available. A successful Node1
+request therefore reports `source=app-dcf`, `entries=1` and the final object
+`1017:00`. Protocol failures retain the SDO abort code and the last stage reached.
 
 ## Windows Host regeneration
 
@@ -77,14 +187,18 @@ wrapper for the same installation sequence.
 There is no Master+Node1-specific generator anymore. Use the generic
 `tools\gen_sdev.ps1` directly so every YAML/DCF conversion follows one Host
 entry point. For this MCU example, keep the safety options shown below:
-`-CompactMaster` shrinks dcfgen's large `CompactSubObj=127/254` Manager arrays,
-trims the explicit `0x1F22` Node-ID range to the configured network, embeds each
-concise DCF `UploadFile` as inline DOMAIN `ParameterValue` bytes, and materializes
-`master.bin` writes such as `0x1F87/0x1F88` into the static Master DCF. The file
-materialization is mandatory because this target has no runtime DCF/bin loader
-and builds with `LELY_NO_CO_OBJ_FILE=1`. `-NoStrings` omits optional OD names,
-`-NoHeader` preserves the project-maintained `master_sdev.h`, and `-MetaFile`
-refreshes the checked-in generation metadata.
+`-CompactMaster` shrinks dcfgen's large `CompactSubObj=127/254` Manager arrays.
+When dcfgen emits `master.bin`, the compactor materializes supported Master-local
+initialization writes before `dcf2c`; for this fixture that preserves the YAML
+`revision_number=1` and `serial_number=1` expectations as `0x1F87:01=1` and
+`0x1F88:01=1` in the static OD. File-backed `UploadFile`/`DownloadFile` values
+remain rejected because the MCU cannot open them with `LELY_NO_CO_OBJ_FILE=1`;
+manual remote configuration belongs in `tools/gen_cfg_dcf.py` and slave `.bin`
+files are not embedded implicitly. After `dcf2c`, the generator also restores
+compact-object `.def` initializers from the DCF `DefaultValue` without changing
+their current `.val`. `-NoStrings` omits optional OD names, `-NoHeader` preserves
+the project-maintained `master_sdev.h`, and `-MetaFile` refreshes the checked-in
+generation metadata.
 
 ```powershell
 .\tools\gen_sdev.ps1 `
@@ -102,35 +216,17 @@ refreshes the checked-in generation metadata.
 ```
 
 The compactor uses the highest configured remote node-ID from `0x1F81` for
-node-indexed Manager arrays and the explicit `0x1F22` array, caps `0x1003` error
-history at 8 entries for this example, and rejects a compacted DCF that still
-estimates more than 256 sub-objects. It also consumes dcfgen `master.bin`; the
-checked-in `0x1F87:01` and `0x1F88:01` values therefore survive regeneration.
-`0x1F22:<node>` must contain the concise DCF bytes themselves, never a
-`nodeN.bin` filename. After `dcf2c`, the Host helper verifies/materializes the
-same DOMAIN bytes in `master_sdev.c` so an older bundled `dcf2c.exe` cannot
-silently publish `.dom = NULL`. These are Host-generation safety limits; they
-do not move any product policy into `runtime.c`.
+node-indexed Manager arrays, caps `0x1003` error history at 8 entries, consumes
+supported `master.bin` writes, rejects unsupported Master writes and file-backed
+OD values, and rejects a compacted DCF that still estimates more than 256
+sub-objects. These are Host-generation safety limits; they do not move any
+product policy into `runtime.c`.
 
 If a previous generation produced a very large `master_sdev.c`, rerun the
-generic command above after updating these tools. Its output must show
-`0x1F87:01`/`0x1F88:01` materialization, `0x1F22:01` embedding/static DOMAIN
-verification, and a line beginning with `Master DCF footprint estimate:` before
-the C file is published. For this Node1-only example, verify the artifacts with:
-
-```powershell
-Select-String -Path .\examples\master_node1\master.dcf -Pattern `
-    "SubNumber=2", "ParameterValue=01000000002000040000005A5AA5A5", `
-    "\[1F87Value\]", "\[1F88Value\]", "UploadFile="
-Select-String -Path .\examples\master_node1\master_sdev.c -Pattern `
-    "CO_DOMAIN_C", "CO_OBJ_FLAGS_PARAMETER_VALUE", `
-    "CO_OBJ_FLAGS_UPLOAD_FILE", "node1.bin"
-```
-
-The expected DCF contains `SubNumber=2`, the inline `ParameterValue`, and
-`[1F87Value]/[1F88Value]`; it must not contain `UploadFile=`. The C file
-contains `CO_DOMAIN_C` plus `CO_OBJ_FLAGS_PARAMETER_VALUE` and must not contain
-`CO_OBJ_FLAGS_UPLOAD_FILE` or `node1.bin`.
+generic command above after updating these tools. For this fixture, the output
+should include `0x1F87:01: materialized from master.bin` and
+`0x1F88:01: materialized from master.bin`, followed by a line beginning with
+`Master DCF footprint estimate:` before the C file is published.
 
 The current Linux review environment cannot execute the bundled Windows
 `dcf2c.exe`, so Windows Host regeneration is still a manual verification item.

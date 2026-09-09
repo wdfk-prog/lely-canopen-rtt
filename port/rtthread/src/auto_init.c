@@ -6,6 +6,7 @@
  * 2026-09-04     wdfk-prog         first version
  * 2026-09-04     wdfk-prog         bind optional static Node1 before runtime start
  * 2026-09-05     wdfk-prog         bind generated local Master instead of Node1
+ * 2026-09-06     wdfk-prog         register Node1 manual CFG application DCF
  */
 
 /**
@@ -19,6 +20,9 @@
 
 #if defined(PKG_LELY_EXAMPLE_MASTER_NODE1)
 #include "master_sdev.h"
+#if defined(PKG_LELY_USING_MASTER_NMT_CFG)
+#include "master_cfg_dcf.h"
+#endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
 #endif /* defined(PKG_LELY_EXAMPLE_MASTER_NODE1) */
 
 #if defined(PKG_LELY_APP_AUTO_INIT)
@@ -119,6 +123,16 @@ lely_rtt_auto_init(void)
         lely_rtt_auto_runtime = RT_NULL;
         return err;
     }
+#if defined(PKG_LELY_USING_MASTER_NMT_CFG)
+    err = lely_rtt_runtime_configure_nmt_dcf(lely_rtt_auto_runtime, 1,
+            master_node1_cfg_dcf, master_node1_cfg_dcf_size);
+    if (err != RT_EOK) {
+        LELY_RTT_LOG_E("auto init Node1 manual CFG data failed: %d", err);
+        lely_rtt_runtime_destroy(lely_rtt_auto_runtime);
+        lely_rtt_auto_runtime = RT_NULL;
+        return err;
+    }
+#endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
 #endif /* defined(PKG_LELY_EXAMPLE_MASTER_NODE1) */
 
     err = lely_rtt_runtime_start(lely_rtt_auto_runtime);

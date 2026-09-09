@@ -8,10 +8,13 @@
  * 2026-09-05     wdfk-prog         correct B4 role to an NMT master runtime
  * 2026-09-05     wdfk-prog         add Master NMT/SDO command APIs for MSH
  * 2026-09-05     wdfk-prog         add NMT configuration, local OD and TIME APIs
+ * 2026-09-06     wdfk-prog         add block Client-SDO and explicit cancellation APIs
  * 2026-09-06     wdfk-prog         clarify CFG restore and TIME lifetime contracts
  * 2026-09-06     wdfk-prog         document snapshot reader scheduling contract
  * 2026-09-06     wdfk-prog         add B5.2 TPDO and B6 EMCY application APIs
  * 2026-09-06     wdfk-prog         document synchronous API thread-context contract
+ * 2026-09-06     wdfk-prog         add B8 manual CFG data and diagnostic APIs
+ * 2026-09-08     wdfk-prog         add B9 SYNC and synchronous PDO application APIs
  */
 
 /**
@@ -77,6 +80,32 @@ struct lely_rtt_nmt_cfg_result {
     rt_err_t local_error; /**< Local dispatch error for LOCAL_ERROR. */
     rt_uint32_t abort_code; /**< SDO abort code, or zero when absent. */
 };
+
+/** @brief Last owner/Lely stage reached by a manual NMT configuration request. */
+enum lely_rtt_nmt_cfg_stage {
+    LELY_RTT_NMT_CFG_STAGE_QUEUED = 0,
+    LELY_RTT_NMT_CFG_STAGE_OWNER_PRECHECK,
+    LELY_RTT_NMT_CFG_STAGE_LELY_SEQUENCE,
+    LELY_RTT_NMT_CFG_STAGE_APPLICATION_DCF,
+    LELY_RTT_NMT_CFG_STAGE_COMPLETE,
+};
+
+/** Embedded 0x1F22 data is available in the local Master object dictionary. */
+#define LELY_RTT_NMT_CFG_SOURCE_OBJECT_1F22       (1u << 0)
+/** A copied application concise DCF is registered for this remote node. */
+#define LELY_RTT_NMT_CFG_SOURCE_APPLICATION_DCF   (1u << 1)
+/** A non-RT-Thread Lely cfg_ind callback is installed by the owner. */
+#define LELY_RTT_NMT_CFG_SOURCE_EXTERNAL_CFG_IND  (1u << 2)
+
+/** @brief Extended diagnostic returned by lely_rtt_runtime_nmt_configure_ex(). */
+struct lely_rtt_nmt_cfg_diagnostic {
+    enum lely_rtt_nmt_cfg_stage stage; /**< Last stage reached before completion/failure. */
+    rt_uint8_t source_flags; /**< Bitwise OR of LELY_RTT_NMT_CFG_SOURCE_* flags. */
+    rt_bool_t restore_requested; /**< Non-zero when object 0x1F8A requests restore/reset. */
+    rt_uint32_t application_dcf_entries; /**< Entries in the registered application DCF. */
+    rt_uint16_t last_index; /**< Last/failing application DCF object, or zero. */
+    rt_uint8_t last_subindex; /**< Last/failing application DCF sub-index. */
+};
 #endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
 
 #if defined(PKG_LELY_USING_MASTER_EMCY)
@@ -107,6 +136,43 @@ struct lely_rtt_time_value {
 };
 #endif /* defined(PKG_LELY_USING_MASTER_TIME) */
 
+#if defined(PKG_LELY_USING_MASTER_SYNC_PDO)
+/** Local PDO direction used by the B9 transmission-type control API. */
+enum lely_rtt_pdo_direction {
+    LELY_RTT_PDO_DIRECTION_RPDO = 0, /**< Local Master receives this PDO. */
+    LELY_RTT_PDO_DIRECTION_TPDO, /**< Local Master transmits this PDO. */
+};
+
+/** The active SYNC service consumes frames from the configured SYNC COB-ID. */
+#define LELY_RTT_SYNC_ROLE_CONSUMER (1u << 0)
+/** The active SYNC service produces frames from object 0x1006's period. */
+#define LELY_RTT_SYNC_ROLE_PRODUCER (1u << 1)
+
+/** @brief Stable owner-published information for one processed SYNC event. */
+struct lely_rtt_sync_event {
+    rt_uint32_t sequence; /**< Increments after each processed SYNC event. */
+    rt_uint32_t period_us; /**< Current local object 0x1006 period in microseconds. */
+    rt_uint8_t counter; /**< Received/transmitted SYNC counter, or zero when unused. */
+    rt_uint8_t role; /**< One of LELY_RTT_SYNC_ROLE_CONSUMER/PRODUCER. */
+};
+
+/**
+ * @brief Optional application indication invoked after synchronous PDO processing.
+ *
+ * Lely invokes this through the runtime owner thread after it has first handled
+ * synchronous TPDOs and then synchronous RPDOs for the same SYNC. The callback
+ * must remain bounded and non-blocking. It may notify another RT-Thread object
+ * (for example, release an application semaphore), but it must not call a
+ * runtime API that waits for owner-thread completion.
+ *
+ * @param runtime Runtime that processed the SYNC event.
+ * @param event Stable event value valid only for the duration of this callback.
+ * @param data Caller value registered before runtime start.
+ */
+typedef void lely_rtt_sync_ind_t(lely_rtt_runtime_t *runtime,
+        const struct lely_rtt_sync_event *event, void *data);
+#endif /* defined(PKG_LELY_USING_MASTER_SYNC_PDO) */
+
 #if defined(PKG_LELY_USING_MASTER_SDO)
 /**
  * @brief Opaque single-use asynchronous SDO request object.
@@ -128,7 +194,7 @@ enum lely_rtt_sdo_operation {
 enum lely_rtt_sdo_completion_status {
     LELY_RTT_SDO_COMPLETION_OK = 0, /**< Remote transfer completed successfully. */
     LELY_RTT_SDO_COMPLETION_ABORT, /**< Remote/protocol completion has an abort code. */
-    LELY_RTT_SDO_COMPLETION_CANCELED, /**< Runtime/NMT teardown canceled the request. */
+    LELY_RTT_SDO_COMPLETION_CANCELED, /**< Explicit/runtime/NMT cancellation. */
     LELY_RTT_SDO_COMPLETION_LOCAL_ERROR, /**< Local owner dispatch/resource failure. */
 };
 
@@ -293,6 +359,51 @@ lely_rtt_runtime_t *lely_rtt_runtime_create(
 rt_err_t lely_rtt_runtime_configure_master(lely_rtt_runtime_t *runtime,
         const struct co_sdev *master_sdev);
 
+#if defined(PKG_LELY_USING_MASTER_SYNC_PDO)
+/**
+ * @brief Register the optional B9 application SYNC indication before start.
+ *
+ * Registration is startup-only. Passing RT_NULL for @p ind disables the
+ * application indication while the owner-published snapshot remains enabled.
+ * The registration persists across stop/start cycles until it is reconfigured or
+ * the runtime is destroyed. The callback and @p data storage must remain valid
+ * for that complete registration lifetime.
+ *
+ * @param runtime Stopped runtime handle.
+ * @param ind Optional bounded owner-thread callback.
+ * @param data Caller value forwarded to @p ind.
+ * @return RT_EOK on success or -RT_EINVAL for an invalid runtime/state.
+ */
+rt_err_t lely_rtt_runtime_configure_sync_ind(lely_rtt_runtime_t *runtime,
+        lely_rtt_sync_ind_t *ind, void *data);
+#endif /* defined(PKG_LELY_USING_MASTER_SYNC_PDO) */
+
+#if defined(PKG_LELY_USING_MASTER_NMT_CFG)
+/**
+ * @brief Register one application concise DCF for manual remote reconfiguration.
+ *
+ * The buffer uses the CiA concise-DCF binary layout consumed by
+ * co_csdo_dn_dcf_req(): a little-endian 32-bit entry count followed by entries
+ * containing index, sub-index, little-endian 32-bit byte length and raw value.
+ * The runtime validates the framing and copies the complete buffer before this
+ * function returns, so caller storage can be released immediately. Registration
+ * is startup-only and one source is accepted per remote Node-ID.
+ *
+ * The registered DCF is intentionally scoped to
+ * lely_rtt_runtime_nmt_configure[_ex](). Automatic NMT boot/configuration
+ * requests do not consume this application source.
+ *
+ * @param runtime Stopped runtime handle.
+ * @param node_id Remote Node-ID in the range 1..127.
+ * @param data Concise DCF bytes copied by this call.
+ * @param size Number of bytes at data.
+ * @return RT_EOK on success, -RT_EINVAL for invalid state/framing, -RT_EBUSY
+ *         when the node already has a source, or -RT_ENOMEM on allocation failure.
+ */
+rt_err_t lely_rtt_runtime_configure_nmt_dcf(lely_rtt_runtime_t *runtime,
+        rt_uint8_t node_id, const void *data, rt_size_t size);
+#endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
+
 /**
  * @brief Start the owner thread and wait for bounded initialization acknowledgement.
  *
@@ -412,8 +523,11 @@ rt_err_t lely_rtt_runtime_post_nmt(lely_rtt_runtime_t *runtime,
  * caller must therefore be a normal non-owner RT-Thread thread. Do not call
  * this API from ISR or scheduler-locked context.
  *
- * A useful request must have embedded concise DCF data at 0x1F22 or an
- * owner-installed Lely cfg_ind callback. Requests that would enter Lely's
+ * A useful request must have embedded concise DCF data at 0x1F22, a copied
+ * application concise DCF registered with lely_rtt_runtime_configure_nmt_dcf(),
+ * or an owner-installed external Lely cfg_ind callback. If both 0x1F22 and the
+ * application DCF are present, Lely applies 0x1F22 first and the RT-Thread
+ * cfg_ind applies the application DCF second. Requests that would enter Lely's
  * 0x1F8A restore/reset path are rejected with LOCAL_ERROR/-RT_ENOSYS because
  * the current Master cannot safely arbitrate that Boot-up handshake with
  * automatic NMT boot. Missing supported work uses the same fail-closed result.
@@ -427,6 +541,25 @@ rt_err_t lely_rtt_runtime_post_nmt(lely_rtt_runtime_t *runtime,
 rt_err_t lely_rtt_runtime_nmt_configure(lely_rtt_runtime_t *runtime,
         rt_uint8_t node_id, rt_uint32_t timeout_ms,
         struct lely_rtt_nmt_cfg_result *result);
+
+/**
+ * @brief Run manual NMT configuration and return stage/source diagnostics.
+ *
+ * This is the diagnostic form of lely_rtt_runtime_nmt_configure(); it preserves
+ * the same owner, timeout, cancellation and result semantics while exposing the
+ * last stage reached and application concise-DCF progress.
+ *
+ * @param runtime Started runtime with a configured local NMT Master.
+ * @param node_id Remote Node-ID in the range 1..127.
+ * @param timeout_ms Configuration/SDO timeout in milliseconds; 1..INT_MAX.
+ * @param result Output terminal result when the function returns RT_EOK.
+ * @param diagnostic Output stage/source diagnostic for the same request.
+ * @return RT_EOK after a terminal result, or an RT-Thread admission/IPC error.
+ */
+rt_err_t lely_rtt_runtime_nmt_configure_ex(lely_rtt_runtime_t *runtime,
+        rt_uint8_t node_id, rt_uint32_t timeout_ms,
+        struct lely_rtt_nmt_cfg_result *result,
+        struct lely_rtt_nmt_cfg_diagnostic *diagnostic);
 #endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
 
 #if defined(PKG_LELY_USING_LOCAL_OD)
@@ -524,25 +657,108 @@ rt_err_t lely_rtt_runtime_get_local_od_change(lely_rtt_runtime_t *runtime,
 
 #if defined(PKG_LELY_USING_MASTER_PDO_TX)
 /**
- * @brief Trigger one statically configured event-driven local TPDO.
+ * @brief Trigger one statically configured local TPDO event.
  *
  * The local NMT state must be Operational because Lely only owns PDO services
- * in that state. The TPDO must already be valid, event-driven (type 254/255),
- * non-MPDO and have a non-empty static mapping. Update mapped manufacturer OD
- * values through lely_rtt_runtime_local_od_write() before calling this API.
- * Dynamic mapping and synchronous TPDO triggering are intentionally excluded.
+ * in that state. The TPDO must already be valid, non-MPDO and have a non-empty
+ * static mapping. B5.2 accepts event-driven type 254/255 and sends immediately.
+ * With PKG_LELY_USING_MASTER_SYNC_PDO, synchronous acyclic type 0 is also
+ * accepted; RT_EOK then means the event is armed and the TPDO is sampled/sent
+ * after the next SYNC. Cyclic synchronous types 1..240 are driven by SYNC and
+ * do not accept a manual TPDO event. Update mapped manufacturer OD values
+ * through lely_rtt_runtime_local_od_write() before calling this API.
  * This call waits for owner completion; invoke it only from a normal schedulable
  * non-owner thread, never from ISR or scheduler-locked context.
  *
  * @param runtime Started runtime with a configured local Master.
  * @param pdo_number Local TPDO number in the range 1..CO_NUM_PDOS.
  * @return RT_EOK after Lely accepts the event, -RT_EBUSY when the PDO service
- *         is inactive, -RT_EINVAL for invalid/non-event-driven configuration,
+ *         is inactive, -RT_EINVAL for an invalid/non-triggerable configuration,
  *         or another owner/IPC/local error.
  */
 rt_err_t lely_rtt_runtime_tpdo_event(lely_rtt_runtime_t *runtime,
         rt_uint16_t pdo_number);
 #endif /* defined(PKG_LELY_USING_MASTER_PDO_TX) */
+
+#if defined(PKG_LELY_USING_MASTER_SYNC_PDO)
+/**
+ * @brief Configure the local SYNC producer cycle period through object 0x1006.
+ *
+ * A non-zero period requires object 0x1005 to configure the local service as
+ * SYNC producer. A zero period stops periodic production without changing the
+ * producer/consumer bit or SYNC COB-ID. The update runs through Lely's object
+ * download indication so the active SYNC service is reconfigured immediately.
+ * Call only from normal schedulable non-owner thread context.
+ *
+ * @param runtime Started runtime with an active SYNC service.
+ * @param period_us Communication cycle period in microseconds; zero disables
+ *                  periodic production.
+ * @return RT_EOK on success, -RT_EBUSY if SYNC/producer mode is unavailable,
+ *         -RT_ERROR when the OD update is rejected, or an admission/IPC error.
+ */
+rt_err_t lely_rtt_runtime_sync_set_period(lely_rtt_runtime_t *runtime,
+        rt_uint32_t period_us);
+
+/**
+ * @brief Read the most recent SYNC event after synchronous PDO processing.
+ *
+ * The snapshot is published by the owner only after Lely processes TPDOs and
+ * RPDOs for that SYNC. If a read races publication it may sleep briefly and
+ * retry, so call only from normal schedulable thread context.
+ *
+ * @param runtime Runtime handle.
+ * @param event Output stable SYNC snapshot.
+ * @return RT_EOK when at least one SYNC was processed, -RT_EBUSY otherwise, or
+ *         -RT_EINVAL for invalid arguments.
+ */
+rt_err_t lely_rtt_runtime_get_sync(lely_rtt_runtime_t *runtime,
+        struct lely_rtt_sync_event *event);
+
+/**
+ * @brief Change one local RPDO/TPDO transmission type through the owner queue.
+ *
+ * B9 accepts synchronous types 0..240 and the existing event-driven types
+ * 254/255. RTR-only/reserved modes are deliberately rejected. The PDO mapping,
+ * COB-ID and all other communication parameters remain unchanged. If the PDO
+ * service is currently active, a successful change involving a synchronous
+ * type reinitializes that service after the OD update. Pending synchronous work
+ * from the previous mode is discarded rather than carried across the mode
+ * boundary. Event-driven 254 <-> 255 changes keep their existing event state.
+ * If reinitialization fails, the bridge restores the previous transmission
+ * type and attempts to reactivate the previous service before returning
+ * -RT_ERROR; transient PDO work discarded by the attempted restart is not
+ * replayed. If rollback activation also fails, the service remains stopped and
+ * later setters fail closed with -RT_EBUSY until NMT recreates it. If no active
+ * service exists, the OD value is consumed when the service next becomes
+ * active. Setting the current type again is otherwise a no-op and preserves
+ * pending state.
+ *
+ * @param runtime Started runtime with a configured local Master.
+ * @param direction Local RPDO or TPDO direction.
+ * @param pdo_number PDO number in the range 1..CO_NUM_PDOS.
+ * @param transmission_type CiA 301 transmission type 0..240, 254 or 255.
+ * @return RT_EOK on success, -RT_EINVAL for invalid input/type, -RT_ENOSYS if
+ *         a synchronous type is requested without a SYNC object, -RT_EBUSY if
+ *         an existing PDO service is stopped, -RT_ERROR on OD/restart failure
+ *         or a missing PDO entry, or another admission/IPC error.
+ */
+rt_err_t lely_rtt_runtime_pdo_set_transmission(lely_rtt_runtime_t *runtime,
+        enum lely_rtt_pdo_direction direction, rt_uint16_t pdo_number,
+        rt_uint8_t transmission_type);
+
+/**
+ * @brief Read one local RPDO/TPDO transmission type through the owner queue.
+ * @param runtime Started runtime with a configured local Master.
+ * @param direction Local RPDO or TPDO direction.
+ * @param pdo_number PDO number in the range 1..CO_NUM_PDOS.
+ * @param transmission_type Output current object 0x1400/0x1800 sub-index 2.
+ * @return RT_EOK on success, -RT_EINVAL for invalid input, -RT_ERROR when the
+ *         PDO communication entry is absent, or another admission/IPC error.
+ */
+rt_err_t lely_rtt_runtime_pdo_get_transmission(lely_rtt_runtime_t *runtime,
+        enum lely_rtt_pdo_direction direction, rt_uint16_t pdo_number,
+        rt_uint8_t *transmission_type);
+#endif /* defined(PKG_LELY_USING_MASTER_SYNC_PDO) */
 
 #if defined(PKG_LELY_USING_MASTER_EMCY)
 /**
@@ -708,6 +924,25 @@ rt_err_t lely_rtt_sdo_request_get_result(
         struct lely_rtt_sdo_result *result);
 
 /**
+ * @brief Request cancellation of a queued or active application SDO transfer.
+ *
+ * A queued request is canceled by atomically claiming its pre-dispatch state.
+ * If that claim wins, owner dispatch completes the request without starting a
+ * remote SDO transfer. An already active request is canceled through the owner
+ * queue and may race with remote completion. The terminal result returned by
+ * lely_rtt_sdo_request_get_result() is authoritative. A successful explicit
+ * cancel is reported as LELY_RTT_SDO_COMPLETION_CANCELED with the CiA 301
+ * connection-unavailable abort code.
+ *
+ * @param request Posted request object that is still queued or active.
+ * @return RT_EOK when queued cancellation is claimed or an active cancel
+ *         command is queued, -RT_EBUSY if the request is already terminal
+ *         or teardown has already claimed it, -RT_EINVAL for a fresh/invalid
+ *         request, or an RT message-queue admission error for the active path.
+ */
+rt_err_t lely_rtt_sdo_request_cancel(lely_rtt_sdo_request_t *request);
+
+/**
  * @brief Queue an SDO upload (remote object read).
  *
  * The owner lazily creates an application-owned Client-SDO using the CiA 301
@@ -752,6 +987,54 @@ rt_err_t lely_rtt_runtime_post_sdo_upload(lely_rtt_runtime_t *runtime,
  *         RT message-queue error. Remote SDO failures are reported in result.
  */
 rt_err_t lely_rtt_runtime_post_sdo_download(lely_rtt_runtime_t *runtime,
+        lely_rtt_sdo_request_t *request, rt_uint8_t node_id,
+        rt_uint16_t index, rt_uint8_t subindex, const void *data,
+        rt_size_t size, rt_uint32_t timeout_ms);
+
+/**
+ * @brief Queue a Client-SDO block upload (remote object read).
+ *
+ * The returned payload has the same request-owned lifetime as a normal upload.
+ * A large block upload therefore requires enough RT-Thread heap to copy the
+ * completed remote value before the request is published as done.
+ *
+ * @param runtime Started runtime with a configured local NMT Master.
+ * @param request Fresh single-use request object.
+ * @param node_id Remote Node-ID in the range 1..127; the local Master Node-ID
+ *                is rejected.
+ * @param index Remote object dictionary index.
+ * @param subindex Remote object dictionary sub-index.
+ * @param pst CiA 301 block-upload protocol switch threshold; 0 disables the
+ *            size-based switch to the regular upload protocol.
+ * @param timeout_ms CSDO protocol timeout in milliseconds; 1..INT_MAX.
+ * @return RT_EOK when queued; otherwise an argument, admission, allocation, or
+ *         RT message-queue error. Remote SDO failures are reported in result.
+ */
+rt_err_t lely_rtt_runtime_post_sdo_block_upload(lely_rtt_runtime_t *runtime,
+        lely_rtt_sdo_request_t *request, rt_uint8_t node_id,
+        rt_uint16_t index, rt_uint8_t subindex, rt_uint8_t pst,
+        rt_uint32_t timeout_ms);
+
+/**
+ * @brief Queue a Client-SDO block download (remote object write).
+ *
+ * The input bytes are copied before this function returns, matching the normal
+ * download ownership contract; the caller may release its source buffer after
+ * a successful post.
+ *
+ * @param runtime Started runtime with a configured local NMT Master.
+ * @param request Fresh single-use request object.
+ * @param node_id Remote Node-ID in the range 1..127; the local Master Node-ID
+ *                is rejected.
+ * @param index Remote object dictionary index.
+ * @param subindex Remote object dictionary sub-index.
+ * @param data Bytes to download; copied by the post call.
+ * @param size Number of bytes in data; must be non-zero.
+ * @param timeout_ms CSDO protocol timeout in milliseconds; 1..INT_MAX.
+ * @return RT_EOK when queued; otherwise an argument, admission, allocation, or
+ *         RT message-queue error. Remote SDO failures are reported in result.
+ */
+rt_err_t lely_rtt_runtime_post_sdo_block_download(lely_rtt_runtime_t *runtime,
         lely_rtt_sdo_request_t *request, rt_uint8_t node_id,
         rt_uint16_t index, rt_uint8_t subindex, const void *data,
         rt_size_t size, rt_uint32_t timeout_ms);
