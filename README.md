@@ -85,6 +85,7 @@ lely-rtt-vendor/
 │   ├── setup_dcfgen_windows.ps1     # 可选：按已验证版本准备 Windows dcfgen 环境
 │   ├── requirements-dcfgen-windows.txt # dcfgen Windows 固定依赖版本
 │   ├── gen_sdev.ps1                 # Windows 通用 YAML/DCF -> static sdev C/H 生成器
+│   ├── gen_cfg_dcf.py               # Lely dcfgen concise DCF -> application C/H 生成器
 │   ├── compact_master_dcf.py        # 裁剪 dcfgen 的大 CompactSubObj Master DCF
 │   └── update_lely.sh
 │
@@ -171,9 +172,11 @@ py -3 -m venv .venv
 .\.venv\Scripts\dcfgen.exe --help
 ```
 
-通用入口是 `tools\gen_sdev.ps1`。它支持两种模式：`-Yml` 先调用 `dcfgen` 生成 Master DCF，再调用 `dcf2c`；`-Dcf` 直接把任意 DCF 转成 static sdev C。`-Name` 指定 C 符号和默认 `.c/.h` 文件名，`-OutDir` 指定输出目录。
+通用 static OD 入口是 `tools\gen_sdev.ps1`。它支持两种模式：`-Yml` 先调用 `dcfgen` 生成 Master DCF，再调用 `dcf2c`；`-Dcf` 直接把任意 DCF 转成 static sdev C。`-Name` 指定 C 符号和默认 `.c/.h` 文件名，`-OutDir` 指定输出目录。
 
-RT-Thread MCU 上的 Master YAML 必须增加 `-CompactMaster -NoStrings`。Lely `dcfgen` 的标准 Master 模板会为多组 Manager 对象生成 `CompactSubObj=127/254`，并把 `0x1F22:<node>` concise DCF 表示成 `UploadFile=nodeN.bin`。目标端 `co_dev_create_from_sdev()` 会把 compact entry 展开成动态 `co_sub_t`，而本工程又使用 `LELY_NO_CO_OBJ_FILE=1`，因此 MCU 既不应保留无用的大数组，也不能依赖运行时打开 `nodeN.bin`。`-CompactMaster` 在 Host 端调用 `tools\compact_master_dcf.py` 收缩数组，并把 `0x1F22` 文件内容物化成 inline DOMAIN `ParameterValue`；`-NoStrings` 再让 `dcf2c` 省略可选对象名称字符串。示例：
+Lely 官方 `dcfgen` 还会为需要配置 SDO 的 slave 生成 `<slave>.bin` concise DCF。B8 的 manual-only application DCF 复用这个官方编码器，但不把生成的 `master.dcf` 发布到目标 Master OD：`tools\gen_cfg_dcf.py` 在临时目录调用 `dcfgen`，只取指定 slave 的 `.bin`，校验 concise-DCF framing 后生成可直接编译的 `.c/.h`。因此 `dcfgen` 负责 CANopen datatype/SDO 编码，本项目脚本只负责 staging、校验和 C 数组封装。
+
+RT-Thread MCU 上的 Master YAML 必须增加 `-CompactMaster -NoStrings`。Lely `dcfgen` 的标准 Master 模板会为多组 Manager 对象生成 `CompactSubObj=127/254`；目标端 `co_dev_create_from_sdev()` 会把这些 compact entry 展开成动态 `co_sub_t`，在小 MCU 上会造成不必要的 heap 压力。`-CompactMaster` 在 Host 端先调用 `tools\compact_master_dcf.py` 收缩这些范围；如果 `dcfgen` 同时生成 `master.bin`，还会把其中受支持的 Master 本地初始化写入（`0x1018:04`、`0x1F55`、`0x1F87`、`0x1F88`）物化进 static DCF，因为 MCU 运行时不会加载 `master.bin`。`UploadFile`/`DownloadFile` 这类目标端无法打开的 file-backed OD 值仍会被拒绝，slave manual remote configuration 继续走 `tools\gen_cfg_dcf.py`，不会把 `<slave>.bin` 隐式塞回 Master OD。`dcf2c` 完成后，生成链还会按 compact DCF 的父对象 `DefaultValue` 校正 static SDEV 的 `.def`，避免把当前 `ParameterValue` 误当成 reset/default 值。`-NoStrings` 再让 `dcf2c` 省略可选对象名称字符串。示例：
 
 ```powershell
 # YAML -> DCF + C + H
@@ -193,7 +196,7 @@ RT-Thread MCU 上的 Master YAML 必须增加 `-CompactMaster -NoStrings`。Lely
     -OutDir .\generated\node1
 ```
 
-Master+Node1 不再使用专用包装器，统一直接调用 `tools\gen_sdev.ps1`。刷新仓库内 MCU 示例时必须显式传入 `-CompactMaster -NoStrings -NoHeader -MetaFile master_sdev.meta`，并继续使用 8-entry 的 `0x1003` error history 上限和 256 个估算 sub-object 的安全门槛。这样 `master.dcf`、`master_sdev.c` 和 `master_sdev.meta` 都由同一个通用入口维护，而 `master_sdev.h` 仍保留为项目维护的声明头。`-CompactMaster` 输出还会拒绝任何残留的 `CO_OBJ_FLAGS_UPLOAD_FILE/CO_OBJ_FLAGS_DOWNLOAD_FILE`，防止把文件名误编译进 `LELY_NO_CO_OBJ_FILE=1` 的 MCU 固件。不要把未经裁剪的 `dcfgen master.dcf` 直接交给 `dcf2c`。`dcfgen --help` 可能打印 `pkg_resources is deprecated` 警告，只要后续命令继续正常执行就不是失败。完整命令和参数见 [DCF、CANopenEditor 与 Lely dcf2c 使用指南](docs/DCF_DCF2C_CANOPENEDITOR.md)。
+Master+Node1 不再使用专用包装器，统一直接调用 `tools\gen_sdev.ps1`。刷新仓库内 MCU 示例时必须显式传入 `-CompactMaster -NoStrings -NoHeader -MetaFile master_sdev.meta`，并继续使用 8-entry 的 `0x1003` error history 上限和 256 个估算 sub-object 的安全门槛。这样 `master.dcf`、`master_sdev.c` 和 `master_sdev.meta` 都由同一个通用入口维护，而 `master_sdev.h` 仍保留为项目维护的声明头。不要把未经裁剪的 `dcfgen master.dcf` 直接交给 `dcf2c`。`dcfgen --help` 可能打印 `pkg_resources is deprecated` 警告，只要后续命令继续正常执行就不是失败。完整命令和参数见 [DCF、CANopenEditor 与 Lely dcf2c 使用指南](docs/DCF_DCF2C_CANOPENEDITOR.md)。
 
 默认 auto-init Master 可通过 `lely_rtt_runtime_get_default()` 获取只读 ownership 的 runtime handle。应用线程只读取 owner 发布的 `lely_rtt_runtime_get_local_nmt_state()`、`lely_rtt_runtime_get_remote_nmt_state()` 和 `lely_rtt_runtime_get_remote_boot_status()` snapshot，不直接进入 Lely。
 
@@ -219,14 +222,14 @@ co nmt reset-comm <node-id|all>
 
 `queued:` 只表示命令已经进入 owner queue，不表示远端节点已经完成状态切换；真实状态继续使用 `co node <id>` 查询。shutdown 开始后 command admission 关闭，队列中尚未执行的控制请求不会越过 teardown 边界。
 
-可选 `PKG_LELY_USING_MASTER_SDO=y` 增加 M2 的异步 request-id CSDO transaction。每个 remote Node-ID 最多只有一个 application SDO 活跃，请求支持协议 timeout、SDO abort code、completion 和 shutdown cancellation。当前实现为 application 独立创建基于 Node-ID 的 CiA 301 预定义默认 CSDO，不借用 NMT boot CSDO；自定义 CSDO COB-ID 留给后续 Controller 配置模型。MSH 当前仅暴露 CiA 301 标量诊断类型：
+可选 `PKG_LELY_USING_MASTER_SDO=y` 增加 M2 的异步 request-id CSDO transaction。每个 remote Node-ID 最多只有一个 application SDO 活跃，请求支持协议 timeout、SDO abort code、completion、显式 application cancel、Client-SDO block upload/download 和 shutdown cancellation。普通与 block download 都在 post 返回前复制输入数据；block upload 的完成数据仍由 request 持有到 destroy。当前实现为 application 独立创建基于 Node-ID 的 CiA 301 预定义默认 CSDO，不借用 NMT boot CSDO；自定义 CSDO COB-ID 留给后续 Controller 配置模型。MSH 当前仍只暴露 CiA 301 标量普通传输诊断类型，block/cancel 作为 application API 提供：
 
 ```text
 co sdo read  <node> <index> <subindex> <bool|u8|u16|u32|i8|i16|i32> <timeout-ms>
 co sdo write <node> <index> <subindex> <bool|u8|u16|u32|i8|i16|i32> <value> <timeout-ms>
 ```
 
-M2 不把 `co_csdo_t *` 暴露给 MSH/application。受控 `stop/reset-node/reset-comm` 会先取消该节点的 application SDO；成功发送 reset 后继续挂起新的 application SDO，直到远端 boot process 完成或状态证据恢复到可进行 SDO 的状态。对于远端自发 Boot-up，owner 会先终止并销毁 application default CSDO，再调用 `co_nmt_on_st()` 让 Lely NMT boot 独占默认 SDO 通道；snapshot 仍在默认 NMT 处理之后发布，且不修改 frozen upstream。M3 的 PDO/SYNC/EMCY 控制 API 本轮没有提前定义。
+M2 不把 `co_csdo_t *` 暴露给 MSH/application。受控 `stop/reset-node/reset-comm` 会先取消该节点的 application SDO；成功发送 reset 后继续挂起新的 application SDO，直到远端 boot process 完成或状态证据恢复到可进行 SDO 的状态。对于远端自发 Boot-up，owner 会先终止并销毁 application default CSDO，再调用 `co_nmt_on_st()` 让 Lely NMT boot 独占默认 SDO 通道；snapshot 仍在默认 NMT 处理之后发布，且不修改 frozen upstream。B9 进一步增加 owner-safe SYNC producer/consumer application bridge、post-PDO SYNC snapshot/callback，以及本地 RPDO/TPDO transmission type `0..240/254/255` 控制；共享 Master+Node1 示例继续保持原有 event-driven 默认值，启用 B9 后可通过 MSH/API 显式切换为同步 PDO。
 
 注意：B4 主站角色与 M0/M1/M2 控制面已经接到源码/配置层，但当前 ZIP 不包含实际 BSP/工具链工程，本阶段没有执行目标 SCons build、目标板运行或 CANopen HIL。
 

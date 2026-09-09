@@ -319,7 +319,7 @@ $venvDcfGen = Join-Path $projectRoot ".venv\Scripts\dcfgen.exe"
 $venvPython = Join-Path $projectRoot ".venv\Scripts\python.exe"
 $bundledDcf2C = Join-Path $scriptDir "dcf2c.exe"
 $compactMasterScript = Join-Path $scriptDir "compact_master_dcf.py"
-$materializeSdevDomainsScript = Join-Path $scriptDir "materialize_sdev_domains.py"
+$normalizeSdevDefaultsScript = Join-Path $scriptDir "normalize_sdev_compact_defaults.py"
 $resolveDcfgenYamlScript = Join-Path $scriptDir "resolve_dcfgen_yaml.py"
 
 $dcf2cResolveArgs = @{
@@ -510,28 +510,30 @@ Create it with the documented Windows dcf-tools setup, then rerun this script.
     }
 
     if ($CompactMaster) {
-        if (-not (Test-Path -LiteralPath $materializeSdevDomainsScript -PathType Leaf)) {
-            throw "Static DOMAIN materializer not found: $materializeSdevDomainsScript"
+        if (-not (Test-Path -LiteralPath $normalizeSdevDefaultsScript -PathType Leaf)) {
+            throw "SDEV compact-default normalizer not found: $normalizeSdevDefaultsScript"
         }
-        $materializeDomainArgs = @(
-            $materializeSdevDomainsScript,
+        $normalizeDefaultArgs = @(
+            $normalizeSdevDefaultsScript,
             "--dcf", $sourceDcf,
             "--c", $stageC
         )
-        Invoke-NativeTool -FilePath $venvPython -Arguments $materializeDomainArgs
+        Invoke-NativeTool -FilePath $venvPython -Arguments $normalizeDefaultArgs
 
-        # The MCU profile uses LELY_NO_CO_OBJ_FILE=1. A file-backed OD value
-        # would compile into a filename but could not be opened at runtime.
+        # The MCU port compiles with LELY_NO_CO_OBJ_FILE=1. File-backed OD
+        # values would retain only a path that the target cannot open. Manual
+        # application DCF and embedded 0x1F22 are separate contracts: migrate
+        # YAML slave SDO data to gen_cfg_dcf.py instead of publishing file flags.
         $fileBackedFlags = Select-String `
             -LiteralPath $stageC `
             -Pattern 'CO_OBJ_FLAGS_(UPLOAD|DOWNLOAD)_FILE' `
             -Quiet
         if ($fileBackedFlags) {
             throw @"
-Compact Master output still contains file-backed object dictionary values.
-The RT-Thread MCU target uses LELY_NO_CO_OBJ_FILE=1, so 0x1F22 concise DCF
-entries must be materialized as inline DOMAIN ParameterValue bytes before dcf2c.
-Refusing to publish $Name.c.
+-CompactMaster output still contains file-backed object dictionary values.
+The RT-Thread MCU target uses LELY_NO_CO_OBJ_FILE=1 and cannot open them.
+Use tools\gen_cfg_dcf.py for manual application concise DCF data or provide
+an inline/static OD value. Refusing to publish $Name.c.
 "@
         }
     }

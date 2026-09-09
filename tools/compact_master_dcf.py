@@ -7,14 +7,11 @@ co_dev_create_from_sdev() later allocates matching dynamic co_sub objects on the
 target. This helper keeps the generated DCF semantics needed by the configured
 network while reducing those expansion ranges for memory-constrained targets.
 
-For fileless MCU builds, it also materializes the dcfgen-generated 0x1F22
-UploadFile references into inline DOMAIN ParameterValue bytes. This is required
-when LELY_NO_CO_OBJ_FILE=1 because the target cannot open the concise DCF file.
-
 dcfgen may additionally emit master.bin with writes that initialize the static
 Master object dictionary (for example 0x1F87/0x1F88 identity expectations).
-Those writes are materialized into the compact DCF as well, because this MCU
-profile has no runtime master.bin loader.
+Those writes are materialized into the compact DCF because this MCU profile has
+no runtime master.bin loader. Slave concise-DCF files remain separate and are
+not embedded implicitly by this helper.
 """
 
 from __future__ import annotations
@@ -32,7 +29,6 @@ VALUE_SECTION_RE = re.compile(r"^([0-9A-Fa-f]{4})Value$", re.IGNORECASE)
 TPDO_RESERVED_SUB4_RE = re.compile(
     r"^([0-9A-Fa-f]{4})sub0?4$", re.IGNORECASE
 )
-CONCISE_DCF_SUB_RE = re.compile(r"^1F22sub([0-9A-Fa-f]{1,2})$", re.IGNORECASE)
 
 # These compact arrays are indexed by CANopen node-ID. Keeping sub-indices up to
 # the highest configured node preserves the access pattern used by NMT/boot
@@ -61,14 +57,6 @@ class Section:
     end: int
 
 
-@dataclass
-class EmbeddedConciseDcf:
-    subidx: int
-    filename: str
-    size: int
-    entries: int
-
-
 @dataclass(frozen=True)
 class ConciseDcfEntry:
     index: int
@@ -76,8 +64,79 @@ class ConciseDcfEntry:
     data: bytes
 
 
+def parse_positive_int(text: str) -> int | None:
+    value = text.strip()
+    if re.fullmatch(r"[0-9]+", value):
+        return int(value, 10)
+    if re.fullmatch(r"0[xX][0-9A-Fa-f]+", value):
+        return int(value, 16)
+    return None
+
+
+def collect_sections(lines: list[str]) -> list[Section]:
+    starts: list[tuple[str, int]] = []
+    for index, line in enumerate(lines):
+        match = SECTION_RE.match(line.rstrip("\r\n"))
+        if match:
+            starts.append((match.group(1).strip(), index))
+
+    sections: list[Section] = []
+    for position, (name, start) in enumerate(starts):
+        end = starts[position + 1][1] if position + 1 < len(starts) else len(lines)
+        sections.append(Section(name=name, start=start, end=end))
+    return sections
+
+
+def section_values(lines: list[str], section: Section) -> dict[str, tuple[str, int]]:
+    result: dict[str, tuple[str, int]] = {}
+    for index in range(section.start + 1, section.end):
+        match = KEY_VALUE_RE.match(lines[index])
+        if not match:
+            continue
+        key = match.group(2).strip()
+        value = match.group(4).strip()
+        result[key.casefold()] = (value, index)
+    return result
+
+
+def numeric_value_keys(lines: list[str], section: Section) -> list[int]:
+    keys: list[int] = []
+    for index in range(section.start + 1, section.end):
+        match = KEY_VALUE_RE.match(lines[index])
+        if not match:
+            continue
+        key = match.group(2).strip()
+        if key.casefold() == "nrofentries":
+            continue
+        parsed = parse_positive_int(key)
+        if parsed is not None and parsed > 0:
+            keys.append(parsed)
+    return keys
+
+
+def configured_max_node_id(text: str) -> int:
+    """Return the highest remote node-ID represented by [1F81Value]."""
+    lines = text.splitlines(keepends=True)
+    sections = collect_sections(lines)
+    by_name = {section.name.casefold(): section for section in sections}
+    node_assignment = by_name.get("1f81value")
+    node_ids = numeric_value_keys(lines, node_assignment) if node_assignment else []
+    max_node_id = max(node_ids, default=1)
+    if max_node_id > 127:
+        raise ValueError(f"invalid CANopen node-ID in [1F81Value]: {max_node_id}")
+    return max_node_id
+
+
+def replace_value(line: str, new_value: int) -> str:
+    match = KEY_VALUE_RE.match(line)
+    if not match:
+        raise ValueError(f"cannot rewrite DCF key/value line: {line!r}")
+    newline = match.group(5) or ""
+    return f"{match.group(1)}{match.group(2)}{match.group(3)}{new_value}{newline}"
+
+
 def parse_concise_dcf(data: bytes, source: Path) -> list[ConciseDcfEntry]:
-    """Parse the concise DCF layout consumed by co_csdo_dn_dcf_req()."""
+    """Parse the concise DCF layout emitted by dcfgen for master.bin."""
     if len(data) < 4:
         raise ValueError(f"concise DCF is shorter than its 4-byte entry count: {source}")
 
@@ -125,6 +184,38 @@ def _format_u32(data: bytes, source: Path, index: int, subidx: int) -> str:
     return f"0x{int.from_bytes(data, 'little'):08X}"
 
 
+def _require_unsigned32_target(
+    text: str, section_name: str, index: int, subidx: int
+) -> None:
+    lines = text.splitlines(keepends=True)
+    by_name = {section.name.casefold(): section for section in collect_sections(lines)}
+    section = by_name.get(section_name.casefold())
+    if section is None:
+        raise ValueError(f"master.bin targets missing DCF section [{section_name}]")
+
+    data_type = section_values(lines, section).get("datatype")
+    parsed = parse_positive_int(data_type[0]) if data_type is not None else None
+    if parsed == 0x0007:
+        return
+
+    actual = data_type[0] if data_type is not None else "<missing>"
+    raise ValueError(
+        f"master.bin target 0x{index:04X}:{subidx:02X} must use UNSIGNED32 "
+        f"(DataType=0x0007), got {actual} in [{section_name}]"
+    )
+
+
+def _replace_key_value(line: str, new_value: str) -> str:
+    match = KEY_VALUE_RE.match(line)
+    if not match:
+        raise ValueError(f"cannot rewrite DCF key/value line: {line!r}")
+    newline = match.group(5) or ""
+    return (
+        f"{match.group(1)}{match.group(2)}{match.group(3)}"
+        f"{new_value}{newline}"
+    )
+
+
 def _upsert_section_value(text: str, section_name: str, key: str, value: str) -> str:
     lines = text.splitlines(keepends=True)
     sections = collect_sections(lines)
@@ -135,7 +226,7 @@ def _upsert_section_value(text: str, section_name: str, key: str, value: str) ->
     values = section_values(lines, section)
     existing = values.get(key.casefold())
     if existing is not None:
-        lines[existing[1]] = replace_key_value(lines[existing[1]], key, value)
+        lines[existing[1]] = _replace_key_value(lines[existing[1]], value)
         return "".join(lines)
 
     newline = _newline_for(text)
@@ -189,14 +280,16 @@ def _upsert_compact_value(text: str, index: int, subidx: int, value: str) -> str
 
 
 def materialize_master_bin(text: str, master_bin: Path | None) -> tuple[str, list[str]]:
-    """Apply dcfgen master.bin writes to the static Master DCF."""
-    if master_bin is None or not master_bin.is_file():
+    """Apply supported dcfgen master.bin writes to the static Master DCF."""
+    if master_bin is None:
         return text, []
 
     entries = parse_concise_dcf(master_bin.read_bytes(), master_bin)
+    max_node_id = configured_max_node_id(text)
     materialized: list[str] = []
     for entry in entries:
         if entry.index == 0x1018 and entry.subidx == 0x04:
+            _require_unsigned32_target(text, "1018sub4", entry.index, entry.subidx)
             text = _upsert_section_value(
                 text,
                 "1018sub4",
@@ -204,6 +297,15 @@ def materialize_master_bin(text: str, master_bin: Path | None) -> tuple[str, lis
                 _format_u32(entry.data, master_bin, entry.index, entry.subidx),
             )
         elif entry.index in {0x1F55, 0x1F87, 0x1F88} and 1 <= entry.subidx <= 127:
+            _require_unsigned32_target(
+                text, f"{entry.index:04X}", entry.index, entry.subidx
+            )
+            if entry.subidx > max_node_id:
+                raise ValueError(
+                    "master.bin node-indexed entry exceeds the compact Master network range: "
+                    f"0x{entry.index:04X}:{entry.subidx:02X}; highest configured "
+                    f"remote node-ID is {max_node_id}"
+                )
             text = _upsert_compact_value(
                 text,
                 entry.index,
@@ -212,78 +314,11 @@ def materialize_master_bin(text: str, master_bin: Path | None) -> tuple[str, lis
             )
         else:
             raise ValueError(
-                f"unsupported master.bin entry for static materialization: "
+                "unsupported master.bin entry for static materialization: "
                 f"0x{entry.index:04X}:{entry.subidx:02X} ({len(entry.data)} bytes)"
             )
         materialized.append(f"0x{entry.index:04X}:{entry.subidx:02X}")
     return text, materialized
-
-
-def parse_positive_int(text: str) -> int | None:
-    value = text.strip()
-    if re.fullmatch(r"[0-9]+", value):
-        return int(value, 10)
-    if re.fullmatch(r"0[xX][0-9A-Fa-f]+", value):
-        return int(value, 16)
-    return None
-
-
-def collect_sections(lines: list[str]) -> list[Section]:
-    starts: list[tuple[str, int]] = []
-    for index, line in enumerate(lines):
-        match = SECTION_RE.match(line.rstrip("\r\n"))
-        if match:
-            starts.append((match.group(1).strip(), index))
-
-    sections: list[Section] = []
-    for position, (name, start) in enumerate(starts):
-        end = starts[position + 1][1] if position + 1 < len(starts) else len(lines)
-        sections.append(Section(name=name, start=start, end=end))
-    return sections
-
-
-def section_values(lines: list[str], section: Section) -> dict[str, tuple[str, int]]:
-    result: dict[str, tuple[str, int]] = {}
-    for index in range(section.start + 1, section.end):
-        match = KEY_VALUE_RE.match(lines[index])
-        if not match:
-            continue
-        key = match.group(2).strip()
-        value = match.group(4).strip()
-        result[key.casefold()] = (value, index)
-    return result
-
-
-def numeric_value_keys(lines: list[str], section: Section) -> list[int]:
-    keys: list[int] = []
-    for index in range(section.start + 1, section.end):
-        match = KEY_VALUE_RE.match(lines[index])
-        if not match:
-            continue
-        key = match.group(2).strip()
-        if key.casefold() == "nrofentries":
-            continue
-        parsed = parse_positive_int(key)
-        if parsed is not None and parsed > 0:
-            keys.append(parsed)
-    return keys
-
-
-def replace_key_value(line: str, new_key: str | None, new_value: str) -> str:
-    match = KEY_VALUE_RE.match(line)
-    if not match:
-        raise ValueError(f"cannot rewrite DCF key/value line: {line!r}")
-    newline = match.group(5) or ""
-    key = new_key if new_key is not None else match.group(2)
-    return f"{match.group(1)}{key}{match.group(3)}{new_value}{newline}"
-
-
-def replace_raw_value(line: str, new_value: str) -> str:
-    return replace_key_value(line, None, new_value)
-
-
-def replace_value(line: str, new_value: int) -> str:
-    return replace_raw_value(line, str(new_value))
 
 
 def strip_reserved_tpdo_sub4(text: str) -> tuple[str, list[str]]:
@@ -328,115 +363,45 @@ def strip_reserved_tpdo_sub4(text: str) -> tuple[str, list[str]]:
     return "".join(lines), removed_objects
 
 
-def validate_concise_dcf(data: bytes, source: Path) -> int:
-    """Validate the binary layout consumed by co_csdo_dn_dcf_req()."""
-    return len(parse_concise_dcf(data, source))
-
-
-def materialize_and_compact_1f22(
-    text: str, *, input_dir: Path, max_node_id: int
-) -> tuple[str, list[EmbeddedConciseDcf], tuple[int, int] | None]:
-    """Inline 0x1F22 UploadFile data and trim unused explicit node entries."""
+def normalize_master_object_contracts(text: str) -> str:
+    """Normalize known dcfgen Master template defects and reject unknown drift."""
     lines = text.splitlines(keepends=True)
-    sections = collect_sections(lines)
-    by_name = {section.name.casefold(): section for section in sections}
-    parent = by_name.get("1f22")
-    if parent is None:
-        return text, [], None
+    by_name = {section.name.casefold(): section for section in collect_sections(lines)}
+    config_request = by_name.get("1f25")
+    if config_request is None:
+        return text
 
-    parent_values = section_values(lines, parent)
-    subnumber = parent_values.get("subnumber")
-    if subnumber is None:
-        raise ValueError("object 0x1F22 has no SubNumber")
-    original_subnumber = parse_positive_int(subnumber[0])
-    if original_subnumber is None or original_subnumber <= 0:
-        raise ValueError("object 0x1F22 has an invalid SubNumber")
+    values = section_values(lines, config_request)
+    data_type = values.get("datatype")
+    parsed = parse_positive_int(data_type[0]) if data_type is not None else None
+    if parsed == 0x0007:
+        return text
+    if parsed == 0x0005 and data_type is not None:
+        # dcf-tools 2.4.2 emits UNSIGNED8 here, but Lely's 0x1F25 handler
+        # consumes the 32-bit CANopen "conf" signature (0x666E6F63).
+        lines[data_type[1]] = _replace_key_value(lines[data_type[1]], "0x0007")
+        return "".join(lines)
 
-    target_subnumber = max_node_id + 1
-    if original_subnumber < target_subnumber:
-        raise ValueError(
-            f"object 0x1F22 SubNumber={original_subnumber} does not cover node-ID {max_node_id}"
-        )
-    if target_subnumber < original_subnumber:
-        lines[subnumber[1]] = replace_value(lines[subnumber[1]], target_subnumber)
+    actual = data_type[0] if data_type is not None else "<missing>"
+    raise ValueError(
+        "CANopen object 0x1F25 Configuration request must use "
+        f"UNSIGNED32 (DataType=0x0007), got {actual}"
+    )
 
-    sub0 = by_name.get("1f22sub0")
-    if sub0 is None:
-        raise ValueError("object 0x1F22 is missing sub-index 0")
-    sub0_values = section_values(lines, sub0)
-    highest = sub0_values.get("defaultvalue")
-    if highest is None:
-        raise ValueError("object 0x1F22:00 has no DefaultValue")
-    lines[highest[1]] = replace_value(lines[highest[1]], max_node_id)
 
-    base_dir = input_dir.resolve()
-    removals: list[Section] = []
-    embedded: list[EmbeddedConciseDcf] = []
-
-    for section in sections:
-        match = CONCISE_DCF_SUB_RE.fullmatch(section.name)
-        if not match:
-            continue
-        subidx = int(match.group(1), 16)
-        if subidx > max_node_id:
-            removals.append(section)
-            continue
-        if subidx == 0:
-            continue
-
+def validate_fileless_object_values(text: str) -> None:
+    """Reject file-backed OD values before publishing an MCU compact DCF."""
+    lines = text.splitlines(keepends=True)
+    for section in collect_sections(lines):
         values = section_values(lines, section)
-        upload = values.get("uploadfile")
-        if upload is None:
-            continue
-        if values.get("parametervalue") is not None:
-            raise ValueError(
-                f"object 0x1F22:{subidx:02X} contains both UploadFile and ParameterValue"
-            )
-
-        filename = upload[0].strip().strip('"')
-        source = (base_dir / filename).resolve()
-        try:
-            source.relative_to(base_dir)
-        except ValueError as exc:
-            raise ValueError(
-                f"object 0x1F22:{subidx:02X} UploadFile escapes the DCF staging directory: "
-                f"{filename}"
-            ) from exc
-        if not source.is_file():
-            raise ValueError(
-                f"object 0x1F22:{subidx:02X} concise DCF file not found: {source}"
-            )
-
-        data = source.read_bytes()
-        entries = validate_concise_dcf(data, source)
-        lines[upload[1]] = replace_key_value(
-            lines[upload[1]], "ParameterValue", data.hex().upper()
-        )
-        embedded.append(
-            EmbeddedConciseDcf(
-                subidx=subidx, filename=filename, size=len(data), entries=entries
-            )
-        )
-
-    for section in sorted(removals, key=lambda item: item.start, reverse=True):
-        del lines[section.start : section.end]
-
-    output = "".join(lines)
-    output_lines = output.splitlines(keepends=True)
-    for section in collect_sections(output_lines):
-        match = CONCISE_DCF_SUB_RE.fullmatch(section.name)
-        if not match or int(match.group(1), 16) == 0:
-            continue
-        values = section_values(output_lines, section)
-        if "uploadfile" in values:
-            raise ValueError(
-                f"object 0x1F22:{int(match.group(1), 16):02X} still contains UploadFile"
-            )
-
-    range_change = None
-    if target_subnumber != original_subnumber:
-        range_change = (original_subnumber - 1, max_node_id)
-    return output, embedded, range_change
+        for key in ("uploadfile", "downloadfile"):
+            if key in values:
+                raise ValueError(
+                    f"[{section.name}] contains {key}; CompactMaster targets "
+                    "LELY_NO_CO_OBJ_FILE=1 and cannot publish file-backed OD "
+                    "values. Use tools/gen_cfg_dcf.py for manual application "
+                    "concise DCF data or provide an inline/static OD value."
+                )
 
 
 def estimate_subobjects(lines: list[str], sections: list[Section]) -> tuple[int, int]:
@@ -467,23 +432,11 @@ def estimate_subobjects(lines: list[str], sections: list[Section]) -> tuple[int,
 def compact_dcf(
     text: str,
     *,
-    input_dir: Path,
-    master_bin: Path | None,
+    master_bin: Path | None = None,
     error_history_depth: int,
     max_subobjects: int,
-) -> tuple[
-    str,
-    list[tuple[str, int, int]],
-    list[str],
-    list[str],
-    list[EmbeddedConciseDcf],
-    tuple[int, int] | None,
-    int,
-    int,
-    int,
-    int,
-    int,
-]:
+) -> tuple[str, list[tuple[str, int, int]], list[str], list[str], int, int, int, int, int]:
+    text = normalize_master_object_contracts(text)
     text, materialized_master_bin = materialize_master_bin(text, master_bin)
     original_lines = text.splitlines(keepends=True)
     before_objects, before_subobjects = estimate_subobjects(
@@ -492,19 +445,7 @@ def compact_dcf(
     text, removed_reserved_tpdo = strip_reserved_tpdo_sub4(text)
     lines = text.splitlines(keepends=True)
     sections = collect_sections(lines)
-    by_name = {section.name.casefold(): section for section in sections}
-
-    node_assignment = by_name.get("1f81value")
-    node_ids = numeric_value_keys(lines, node_assignment) if node_assignment else []
-    max_node_id = max(node_ids, default=1)
-    if max_node_id > 127:
-        raise ValueError(f"invalid CANopen node-ID in [1F81Value]: {max_node_id}")
-
-    text, embedded_1f22, concise_range_change = materialize_and_compact_1f22(
-        text, input_dir=input_dir, max_node_id=max_node_id
-    )
-    lines = text.splitlines(keepends=True)
-    sections = collect_sections(lines)
+    max_node_id = configured_max_node_id(text)
 
     explicit_value_keys: dict[str, list[int]] = {}
     for section in sections:
@@ -544,6 +485,9 @@ def compact_dcf(
             lines[line_index] = replace_value(lines[line_index], target)
             changes.append((obj_index, original, target))
 
+    output_text = "".join(lines)
+    validate_fileless_object_values(output_text)
+    lines = output_text.splitlines(keepends=True)
     after_objects, after_subobjects = estimate_subobjects(lines, collect_sections(lines))
     if max_subobjects > 0 and after_subobjects > max_subobjects:
         raise ValueError(
@@ -553,12 +497,10 @@ def compact_dcf(
         )
 
     return (
-        "".join(lines),
+        output_text,
         changes,
         removed_reserved_tpdo,
         materialized_master_bin,
-        embedded_1f22,
-        concise_range_change,
         max_node_id,
         before_objects,
         before_subobjects,
@@ -603,13 +545,15 @@ def main() -> int:
     if not args.input.is_file():
         print(f"error: input DCF not found: {args.input}", file=sys.stderr)
         return 2
+    if args.master_bin is not None and not args.master_bin.is_file():
+        print(f"error: master.bin not found: {args.master_bin}", file=sys.stderr)
+        return 2
 
     try:
         with args.input.open("r", encoding="utf-8-sig", newline="") as stream:
             source = stream.read()
         result = compact_dcf(
             source,
-            input_dir=args.input.parent,
             master_bin=args.master_bin,
             error_history_depth=args.error_history_depth,
             max_subobjects=args.max_subobjects,
@@ -623,8 +567,6 @@ def main() -> int:
         changes,
         removed_reserved_tpdo,
         materialized_master_bin,
-        embedded_1f22,
-        concise_range_change,
         max_node_id,
         before_obj,
         before_sub,
@@ -650,14 +592,6 @@ def main() -> int:
         print(f"  0x{index}: removed reserved TPDO communication sub-index 04h")
     for target in materialized_master_bin:
         print(f"  {target}: materialized from master.bin")
-    if concise_range_change is not None:
-        old, new = concise_range_change
-        print(f"  0x1F22: explicit Node-ID range 1..{old} -> 1..{new}")
-    for item in embedded_1f22:
-        print(
-            f"  0x1F22:{item.subidx:02X}: embedded {item.filename} "
-            f"({item.size} bytes, {item.entries} entries)"
-        )
     for index, old, new in changes:
         print(f"  0x{index}: CompactSubObj {old} -> {new}")
     print(

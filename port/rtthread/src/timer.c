@@ -4,7 +4,7 @@
  * Change Logs:
  * Date           Author            Notes
  * 2026-09-03     wdfk-prog         first version
- * 2026-09-07     wdfk-prog         synchronize CAN network time before owner work
+ * 2026-09-08     wdfk-prog         synchronize passive and CAN network protocol clocks
  */
 
 /**
@@ -209,27 +209,39 @@ lely_rtt_timer_advance(struct lely_rtt_runtime *runtime)
 }
 
 /**
- * @brief Refresh passive and CAN network time before owner command dispatch.
+ * @brief Refresh io_can_net protocol time from the already-advanced passive clock.
+ *
+ * The owner calls this only after draining executor work queued by the current
+ * RX/status batch. This ordering prevents an already-received CAN response from
+ * being overtaken by its timeout, while still giving a later command a current
+ * time base for newly created relative deadlines.
+ *
  * @param runtime Runtime instance; must be called by the owner thread.
  */
 void
 lely_rtt_timer_sync_can_net(struct lely_rtt_runtime *runtime)
 {
-    struct timespec now;
+    rt_err_t err = RT_EOK;
 
-    if (!runtime || !runtime->timer || !runtime->can_net)
-        return;
-    if (lely_rtt_time_now(runtime, &now) != RT_EOK)
-        return;
-    if (io_clock_settime(io_timer_get_clock(runtime->timer), &now) == -1)
+    if (!runtime || !runtime->can_net)
         return;
 
-    /*
-     * CANopen relative timers derive deadlines from can_net time. The owner
-     * calls this only after draining work queued from the current RX/status
-     * batch, so protocol time cannot overtake an already received CAN frame.
-     */
-    (void)io_can_net_set_time(runtime->can_net);
+    if (io_can_net_lock(runtime->can_net) != 0) {
+        err = -RT_ERROR;
+    } else {
+        if (io_can_net_set_time(runtime->can_net) == -1)
+            err = -RT_ERROR;
+        if (io_can_net_unlock(runtime->can_net) != 0 && err == RT_EOK)
+            err = -RT_ERROR;
+    }
+
+    if (err != RT_EOK) {
+        LELY_RTT_LOG_E("CAN network time synchronization failed");
+        if (runtime->runtime_error == RT_EOK)
+            runtime->runtime_error = err;
+        if (runtime->event_initialized)
+            rt_event_send(&runtime->event, LELY_RTT_EVENT_STOP);
+    }
 }
 
 /**

@@ -23,7 +23,7 @@ const struct co_sdev master_sdev = {
 	.rate = 1000,
 	.lss = 1,
 	.dummy = 0x0f7d00fe,
-	.nobj = 40,
+	.nobj = 39,
 	.objs = (const struct co_sobj[]){{
 #if !LELY_NO_CO_OBJ_NAME
 		.name = CO_SDEV_STRING("Device type"),
@@ -1012,52 +1012,6 @@ const struct co_sdev master_sdev = {
 		}}
 	}, {
 #if !LELY_NO_CO_OBJ_NAME
-		.name = CO_SDEV_STRING("Concise DCF"),
-#endif
-		.idx = 0x1f22,
-		.code = CO_OBJECT_ARRAY,
-		.nsub = 2,
-		.subs = (const struct co_ssub[]){{
-#if !LELY_NO_CO_OBJ_NAME
-			.name = CO_SDEV_STRING("Highest sub-index supported"),
-#endif
-			.subidx = 0x00,
-			.type = CO_DEFTYPE_UNSIGNED8,
-#if !LELY_NO_CO_OBJ_LIMITS
-			.min = { .u8 = CO_UNSIGNED8_MIN },
-			.max = { .u8 = CO_UNSIGNED8_MAX },
-#endif
-#if !LELY_NO_CO_OBJ_DEFAULT
-			.def = { .u8 = 0x01 },
-#endif
-			.val = { .u8 = 0x01 },
-			.access = CO_ACCESS_CONST,
-			.pdo_mapping = 0,
-			.flags = 0
-		}, {
-#if !LELY_NO_CO_OBJ_NAME
-			.name = CO_SDEV_STRING("Node-ID 1"),
-#endif
-			.subidx = 0x01,
-			.type = CO_DEFTYPE_DOMAIN,
-#if !LELY_NO_CO_OBJ_LIMITS
-			.min = { .dom = NULL },
-			.max = { .dom = NULL },
-#endif
-#if !LELY_NO_CO_OBJ_DEFAULT
-			.def = { .dom = NULL },
-#endif
-			.val = { .dom = CO_DOMAIN_C(co_unsigned8_t, {
-				0x01, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00, 0x04,
-				0x00, 0x00, 0x00, 0x5a, 0x5a, 0xa5, 0xa5
-			}) },
-			.access = CO_ACCESS_RO,
-			.pdo_mapping = 0,
-			.flags = 0
-				| CO_OBJ_FLAGS_PARAMETER_VALUE
-		}}
-	}, {
-#if !LELY_NO_CO_OBJ_NAME
 		.name = CO_SDEV_STRING("Configuration request"),
 #endif
 		.idx = 0x1f25,
@@ -1085,15 +1039,15 @@ const struct co_sdev master_sdev = {
 			.name = CO_SDEV_STRING("Configuration request1"),
 #endif
 			.subidx = 0x01,
-			.type = CO_DEFTYPE_UNSIGNED8,
+			.type = CO_DEFTYPE_UNSIGNED32,
 #if !LELY_NO_CO_OBJ_LIMITS
-			.min = { .u8 = CO_UNSIGNED8_MIN },
-			.max = { .u8 = CO_UNSIGNED8_MAX },
+			.min = { .u32 = CO_UNSIGNED32_MIN },
+			.max = { .u32 = CO_UNSIGNED32_MAX },
 #endif
 #if !LELY_NO_CO_OBJ_DEFAULT
-			.def = { .u8 = CO_UNSIGNED8_MIN },
+			.def = { .u32 = CO_UNSIGNED32_MIN },
 #endif
-			.val = { .u8 = CO_UNSIGNED8_MIN },
+			.val = { .u32 = CO_UNSIGNED32_MIN },
 			.access = CO_ACCESS_WO,
 			.pdo_mapping = 0,
 			.flags = 0

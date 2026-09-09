@@ -1,0 +1,16 @@
+# Host-only input for the B8 manual application concise DCF.
+#
+# Lely dcfgen is used only as the protocol-aware SDO/concise-DCF encoder. The
+# generated master.dcf remains in a temporary staging directory and is discarded
+# by tools/gen_cfg_dcf.py, so this input does not populate the runtime Master's
+# object 0x1F22 or change automatic NMT boot configuration.
+master:
+  node_id: 127
+
+node1:
+  dcf: ../node1/node1.dcf
+  node_id: 1
+  sdo:
+    - index: 0x1017
+      sub_index: 0
+      value: 1000

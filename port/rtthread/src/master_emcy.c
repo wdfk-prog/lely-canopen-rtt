@@ -5,6 +5,7 @@
  * Date           Author            Notes
  * 2026-09-06     wdfk-prog         first version
  * 2026-09-06     wdfk-prog         make history sequence wrap an epoch boundary
+ * 2026-09-08     wdfk-prog         restore frozen Lely EMCY callback signature
  */
 
 /**
