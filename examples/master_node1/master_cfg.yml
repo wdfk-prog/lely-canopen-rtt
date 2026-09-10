@@ -1,4 +1,4 @@
-# Host-only input for the B8 manual application concise DCF.
+# Host-only input for the manual application concise DCF.
 #
 # Lely dcfgen is used only as the protocol-aware SDO/concise-DCF encoder. The
 # generated master.dcf remains in a temporary staging directory and is discarded

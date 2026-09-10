@@ -10,10 +10,10 @@
  * 2026-09-05     wdfk-prog         add synchronous CFG, local OD and TIME state
  * 2026-09-06     wdfk-prog         document passive timer owner ordering
  * 2026-09-06     wdfk-prog         add local NMT CFG lifetime barrier hook
- * 2026-09-06     wdfk-prog         add B5.2 TPDO and B6 EMCY owner bridges
+ * 2026-09-06     wdfk-prog         add TPDO and EMCY owner bridges
  * 2026-09-06     wdfk-prog         add managed manual CFG source state
  * 2026-09-07     wdfk-prog         synchronize passive and CAN network clocks
- * 2026-09-08     wdfk-prog         add B9 SYNC and synchronous PDO owner state
+ * 2026-09-08     wdfk-prog         add SYNC and synchronous PDO owner state
  */
 
 /**
@@ -463,7 +463,7 @@ void lely_rtt_local_od_cancel_queued(struct lely_rtt_local_od_request *request);
 #endif /* defined(PKG_LELY_USING_LOCAL_OD) */
 
 #if defined(PKG_LELY_USING_MASTER_PDO_TX)
-/** @brief Dispatch one owner-safe TPDO event or B9 PDO transmission operation. */
+/** @brief Dispatch one owner-safe TPDO event or PDO transmission operation. */
 void lely_rtt_master_pdo_dispatch(struct lely_rtt_runtime *runtime,
         struct lely_rtt_master_pdo_request *request);
 /** @brief Complete a PDO request that never reached the owner. */

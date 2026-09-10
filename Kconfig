@@ -70,7 +70,7 @@ menuconfig PKG_LELY_APP_AUTO_INIT
         RT-Thread application initialization through INIT_APP_EXPORT(). Disable
         this when the product creates lely_rtt_runtime instances explicitly.
 
-        Auto init always starts the B3 single-owner EV/IO2/CAN transport.
+        Auto init always starts the single-owner EV/IO2/CAN transport.
         PKG_LELY_EXAMPLE_MASTER_NODE1 additionally binds the generated local
         Master OD before start; product-specific Master/remote-node policy stays
         in the Host generation input instead of being invented by runtime.c.
@@ -227,8 +227,8 @@ config PKG_LELY_MASTER_COMMAND_QUEUE_DEPTH
     default 8
     help
         Maximum copied Master commands waiting for owner dispatch. The default
-        preserves the previous B4 command-queue memory budget while moving the
-        queue to the corrected remote-Master control role. Owner dispatch is
+        keeps the existing command-queue memory budget while using the
+        corrected remote-Master control role. Owner dispatch is
         bounded by this depth on each command wakeup.
 
 config PKG_LELY_USING_MASTER_SDO
@@ -287,7 +287,7 @@ config PKG_LELY_USING_MASTER_PDO_TX
         Allow application/MSH threads to trigger an already configured static
         Master TPDO through the owner queue. Applications update mapped
         0x2000..0x5FFF values with the local OD bridge first, then issue the
-        TPDO event. B5.2 accepts event-driven types 0xFE/0xFF. When the B9
+        TPDO event. Event-driven types 0xFE/0xFF are accepted. When the
         SYNC/PDO bridge is enabled it also accepts synchronous acyclic type 0,
         which arms the TPDO for the next SYNC. Dynamic PDO remapping remains
         outside this bridge.
@@ -307,7 +307,7 @@ config PKG_LELY_USING_MASTER_SYNC_PDO
         application callback, and expose owner-safe control of object 0x1006
         plus local RPDO/TPDO transmission type. The PDO control accepts CiA 301
         synchronous types 0..240 and existing event-driven types 254/255; RTR-
-        only modes and dynamic PDO remapping remain outside B9.
+        only modes and dynamic PDO remapping remain outside this bridge.
 
 config PKG_LELY_USING_MASTER_EMCY
     bool "Enable CANopen EMCY application bridge"

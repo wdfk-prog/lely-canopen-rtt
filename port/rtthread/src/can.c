@@ -352,7 +352,7 @@ lely_rtt_can_to_rt(const struct lely_rtt_runtime *runtime,
 /**
  * @brief Transmit one Lely frame through the RT-Thread non-blocking CAN path.
  * @param msg Lely CAN frame to transmit.
- * @param timeout Lely timeout argument; ignored because B3 requires non-blocking TX.
+ * @param timeout Lely timeout argument; ignored because this port requires non-blocking TX.
  * @param arg Runtime instance supplied to io_user_can.
  * @return 0 when RT-Thread accepts the frame, otherwise -1 with errnum set.
  */
@@ -411,7 +411,7 @@ lely_rtt_can_init(struct lely_rtt_runtime *runtime)
     }
 
     /*
-     * B3 TX relies on rt_can_msg.nonblocking. Fail startup rather than silently
+     * TX relies on rt_can_msg.nonblocking. Fail startup rather than silently
      * falling back to a potentially blocking driver send path.
      */
     can = (struct rt_can_device *)runtime->can_dev;

@@ -8,7 +8,7 @@
 
 /**
  * @file test_master_sync_pdo.c
- * @brief Host-stub regression tests for the RT-Thread B9 SYNC/PDO bridge.
+ * @brief Host-stub regression tests for the RT-Thread SYNC/PDO bridge.
  */
 
 #include <stdint.h>
@@ -323,7 +323,7 @@ rt_event_recv(struct rt_event *event, rt_uint32_t set, rt_uint8_t option,
     /*
      * Pump the real Master command dispatcher at the point where the caller
      * would block. This models the separate owner thread deterministically, so
-     * public B9 APIs still traverse command post -> queue -> dispatch -> wait.
+     * public SYNC/PDO APIs still traverse command post -> queue -> dispatch -> wait.
      */
     if (!(event->pending & set) && dispatch_runtime
             && dispatch_runtime->command_mq
@@ -1281,6 +1281,6 @@ main(void)
     test_pdo_rollback_restart_failure_fails_closed();
     test_tpdo_event_modes();
     test_owner_thread_wait_rejected();
-    puts("Passed 16/16 host B9 cases");
+    puts("Passed 16/16 host SYNC/PDO cases");
     return 0;
 }

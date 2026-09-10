@@ -57,7 +57,7 @@ while IFS= read -r path; do
     [ -e "$root/$vendor_path" ] || fail "allowlisted path is missing: $vendor_path"
 done < "$root/metadata/VENDOR_ALLOWLIST.txt"
 
-# The B0 package intentionally retains ev/io2 because the RT-Thread port will
+# The package intentionally retains ev/io2 because the RT-Thread port will
 # use Lely's executor and asynchronous I/O mechanisms. Keep unrelated
 # application/legacy I/O/tap modules out of this target vendor boundary.
 for path in \

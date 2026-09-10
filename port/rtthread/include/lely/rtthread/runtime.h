@@ -5,16 +5,16 @@
  * Date           Author            Notes
  * 2026-09-03     wdfk-prog         first version
  * 2026-09-04     wdfk-prog         add CANopen node and command ingress APIs
- * 2026-09-05     wdfk-prog         correct B4 role to an NMT master runtime
+ * 2026-09-05     wdfk-prog         correct the local role to an NMT master runtime
  * 2026-09-05     wdfk-prog         add Master NMT/SDO command APIs for MSH
  * 2026-09-05     wdfk-prog         add NMT configuration, local OD and TIME APIs
  * 2026-09-06     wdfk-prog         add block Client-SDO and explicit cancellation APIs
  * 2026-09-06     wdfk-prog         clarify CFG restore and TIME lifetime contracts
  * 2026-09-06     wdfk-prog         document snapshot reader scheduling contract
- * 2026-09-06     wdfk-prog         add B5.2 TPDO and B6 EMCY application APIs
+ * 2026-09-06     wdfk-prog         add TPDO and EMCY application APIs
  * 2026-09-06     wdfk-prog         document synchronous API thread-context contract
- * 2026-09-06     wdfk-prog         add B8 manual CFG data and diagnostic APIs
- * 2026-09-08     wdfk-prog         add B9 SYNC and synchronous PDO application APIs
+ * 2026-09-06     wdfk-prog         add manual CFG data and diagnostic APIs
+ * 2026-09-08     wdfk-prog         add SYNC and synchronous PDO application APIs
  */
 
 /**
@@ -137,7 +137,7 @@ struct lely_rtt_time_value {
 #endif /* defined(PKG_LELY_USING_MASTER_TIME) */
 
 #if defined(PKG_LELY_USING_MASTER_SYNC_PDO)
-/** Local PDO direction used by the B9 transmission-type control API. */
+/** Local PDO direction used by the transmission-type control API. */
 enum lely_rtt_pdo_direction {
     LELY_RTT_PDO_DIRECTION_RPDO = 0, /**< Local Master receives this PDO. */
     LELY_RTT_PDO_DIRECTION_TPDO, /**< Local Master transmits this PDO. */
@@ -346,7 +346,7 @@ lely_rtt_runtime_t *lely_rtt_runtime_create(
  * and co_nmt_t objects are created later by the owner thread after io_can_net
  * has started.
  *
- * This preserves the B3 runtime configuration ABI: the optional Master binding
+ * This preserves the runtime configuration ABI: the optional Master binding
  * lives in the opaque runtime instead of extending lely_rtt_runtime_config.
  * The description and every string/value referenced by it must remain valid
  * until lely_rtt_runtime_destroy().
@@ -361,7 +361,7 @@ rt_err_t lely_rtt_runtime_configure_master(lely_rtt_runtime_t *runtime,
 
 #if defined(PKG_LELY_USING_MASTER_SYNC_PDO)
 /**
- * @brief Register the optional B9 application SYNC indication before start.
+ * @brief Register the optional application SYNC indication before start.
  *
  * Registration is startup-only. Passing RT_NULL for @p ind disables the
  * application indication while the owner-published snapshot remains enabled.
@@ -661,7 +661,7 @@ rt_err_t lely_rtt_runtime_get_local_od_change(lely_rtt_runtime_t *runtime,
  *
  * The local NMT state must be Operational because Lely only owns PDO services
  * in that state. The TPDO must already be valid, non-MPDO and have a non-empty
- * static mapping. B5.2 accepts event-driven type 254/255 and sends immediately.
+ * static mapping. This API accepts event-driven type 254/255 and sends immediately.
  * With PKG_LELY_USING_MASTER_SYNC_PDO, synchronous acyclic type 0 is also
  * accepted; RT_EOK then means the event is armed and the TPDO is sampled/sent
  * after the next SYNC. Cyclic synchronous types 1..240 are driven by SYNC and
@@ -717,7 +717,7 @@ rt_err_t lely_rtt_runtime_get_sync(lely_rtt_runtime_t *runtime,
 /**
  * @brief Change one local RPDO/TPDO transmission type through the owner queue.
  *
- * B9 accepts synchronous types 0..240 and the existing event-driven types
+ * This API accepts synchronous types 0..240 and the existing event-driven types
  * 254/255. RTR-only/reserved modes are deliberately rejected. The PDO mapping,
  * COB-ID and all other communication parameters remain unchanged. If the PDO
  * service is currently active, a successful change involving a synchronous

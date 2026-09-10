@@ -4,7 +4,7 @@
  * Change Logs:
  * Date           Author            Notes
  * 2026-09-06     wdfk-prog         first version
- * 2026-09-06     wdfk-prog         add B9 synchronous PDO control and safe mode transitions
+ * 2026-09-06     wdfk-prog         add synchronous PDO control and safe mode transitions
  */
 
 /**
@@ -12,8 +12,8 @@
  * @brief Owner-safe TPDO event and PDO transmission control for RT-Thread.
  *
  * Local mapped values are written through the existing owner-safe OD API. This
- * module never changes mapping/COB-ID. B9 applies transmission-type changes
- * through Lely's OD indication and reinitializes an active PDO service at
+ * module never changes mapping/COB-ID. The bridge applies transmission-type
+ * changes through Lely's OD indication and reinitializes an active PDO service at
  * synchronous mode boundaries so old transient state cannot cross the edge.
  *
  * @author wdfk-prog
@@ -46,7 +46,7 @@ enum lely_rtt_master_pdo_operation {
 };
 
 #if defined(PKG_LELY_USING_MASTER_SYNC_PDO)
-/** @brief Return whether B9 exposes this non-RTR CiA 301 transmission type. */
+/** @brief Return whether the bridge exposes this non-RTR CiA 301 transmission type. */
 static rt_bool_t
 lely_rtt_master_pdo_transmission_supported(rt_uint8_t transmission_type)
 {
@@ -309,7 +309,7 @@ lely_rtt_runtime_tpdo_event(lely_rtt_runtime_t *runtime, rt_uint16_t pdo_number)
 }
 
 #if defined(PKG_LELY_USING_MASTER_SYNC_PDO)
-/** @brief Submit one synchronous B9 PDO communication-parameter request. */
+/** @brief Submit one synchronous PDO communication-parameter request. */
 static rt_err_t
 lely_rtt_master_pdo_submit(lely_rtt_runtime_t *runtime,
         struct lely_rtt_master_pdo_request *request)

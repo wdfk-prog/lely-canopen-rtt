@@ -42,7 +42,7 @@ lely_rtt_runtime_get_default(void)
 /**
  * @brief Fill the default runtime configuration from Kconfig.
  *
- * The base configuration remains the B3 transport contract. When the built-in
+ * The base configuration remains the transport contract. When the built-in
  * Master + remote Node1 example is selected, lely_rtt_auto_init() binds the
  * generated local Master co_sdev before start; all co_* construction still
  * occurs later in the owner thread.

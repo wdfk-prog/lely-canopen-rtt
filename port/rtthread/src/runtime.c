@@ -5,7 +5,7 @@
  * Date           Author            Notes
  * 2026-09-03     wdfk-prog         first version
  * 2026-09-04     wdfk-prog         add owner CANopen node and command ingress
- * 2026-09-05     wdfk-prog         correct B4 role to a local NMT Master
+ * 2026-09-05     wdfk-prog         correct the local role to an NMT Master
  * 2026-09-06     wdfk-prog         retire CFG requests at local NMT barriers
  * 2026-09-07     wdfk-prog         preserve boot completion in remote state snapshot
  * 2026-09-08     wdfk-prog         ignore stale outer BOOTUP after synchronous boot completion
@@ -162,8 +162,8 @@ lely_rtt_master_state_ind(co_nmt_t *nmt, co_unsigned8_t id,
 #if defined(PKG_LELY_USING_MASTER_SDO)
     /*
      * co_nmt_on_st() can synchronously start NMT boot on remote Boot-up.
-     * M2 therefore performs one narrow pre-chain arbitration step: retire only
-     * the application-owned default CSDO before Lely creates its own default
+     * The application SDO path therefore performs one narrow pre-chain arbitration
+     * step: retire only the application-owned default CSDO before Lely creates its own
      * CSDO on the same CiA 301 response COB-ID. This does not process or publish
      * the NMT state; co_nmt_on_st() remains the NMT state-machine handler below.
      */
@@ -1118,7 +1118,7 @@ lely_rtt_runtime_get_local_nmt_state(lely_rtt_runtime_t *runtime,
 }
 
 /**
- * @brief Preserve the pre-B4 state getter as an alias to the local Master state.
+ * @brief Preserve the legacy state getter as an alias to the local Master state.
  */
 rt_err_t
 lely_rtt_runtime_get_nmt_state(lely_rtt_runtime_t *runtime,

@@ -27,7 +27,7 @@ class MasterSyncPdoHostHarnessTests(unittest.TestCase):
         if not compiler:
             self.fail("host C compiler not found; set HOST_CC to a native compiler executable")
 
-        with tempfile.TemporaryDirectory(prefix="lely-master-b9-test-") as temp_dir:
+        with tempfile.TemporaryDirectory(prefix="lely-master-sync-pdo-test-") as temp_dir:
             temp = Path(temp_dir)
             stub_dir = temp / "stubs" / "lely" / "co"
             stub_dir.mkdir(parents=True)
@@ -75,7 +75,7 @@ class MasterSyncPdoHostHarnessTests(unittest.TestCase):
             "owner-thread-wait-rejected",
         ):
             self.assertIn(f"PASS {name}", completed.stdout)
-        self.assertIn("Passed 16/16 host B9 cases", completed.stdout)
+        self.assertIn("Passed 16/16 host SYNC/PDO cases", completed.stdout)
 
 
 if __name__ == "__main__":
