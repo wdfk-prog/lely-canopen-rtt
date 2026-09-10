@@ -32,7 +32,7 @@ lely-canopen-rtt/
 │   └── node1/                     # 远端 Node1 DCF fixture
 ├── metadata/                      # upstream 身份和源码选择策略
 ├── tools/                         # Host 生成与 vendor 维护工具
-├── tests/host/                    # Host/源码级回归测试
+├── .github/ci/lely-canopen-rtt/   # Host/源码级 CI 回归测试
 └── docs/
     ├── en/                        # English manual
     └── zh/                        # 中文手册

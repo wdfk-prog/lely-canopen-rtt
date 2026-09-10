@@ -1,0 +1,54 @@
+name: CI
+
+"on":
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host-tests:
+    name: Host regression tests
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout package
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.10'
+
+      - name: Verify Host toolchain
+        run: |
+          python --version
+          cc --version
+
+      - name: Run Host regression tests
+        run: |
+          set -o pipefail
+          python -m unittest discover \
+            -s .github/ci/lely-canopen-rtt \
+            -p 'test_*.py' \
+            -v 2>&1 | tee host-tests.log
+
+      - name: Upload Host test log
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: host-tests-log
+          path: host-tests.log
+          if-no-files-found: error

@@ -12,6 +12,7 @@ def find_host_compiler():
     override = os.environ.get("HOST_CC")
     if override:
         return shutil.which(override)
+
     for candidate in ("cc", "gcc", "clang"):
         compiler = shutil.which(candidate)
         if compiler:
@@ -19,22 +20,22 @@ def find_host_compiler():
     return None
 
 
-class MasterSyncPdoHostHarnessTests(unittest.TestCase):
-    def test_master_sync_pdo_host_harness(self):
-        repo_root = Path(__file__).resolve().parents[2]
-        source = repo_root / "tests" / "host" / "test_master_sync_pdo.c"
+class MasterCfgHostHarnessTests(unittest.TestCase):
+    def test_master_cfg_host_harness(self):
+        repo_root = Path(__file__).resolve().parents[3]
+        source = Path(__file__).resolve().with_suffix(".c")
         compiler = find_host_compiler()
         if not compiler:
             self.fail("host C compiler not found; set HOST_CC to a native compiler executable")
 
-        with tempfile.TemporaryDirectory(prefix="lely-master-sync-pdo-test-") as temp_dir:
+        with tempfile.TemporaryDirectory(prefix="lely-master-cfg-test-") as temp_dir:
             temp = Path(temp_dir)
             stub_dir = temp / "stubs" / "lely" / "co"
             stub_dir.mkdir(parents=True)
-            for header in ("dev.h", "obj.h", "pdo.h", "rpdo.h", "sync.h", "tpdo.h"):
+            for header in ("csdo.h", "dev.h", "obj.h"):
                 (stub_dir / header).write_text("\n", encoding="ascii")
 
-            binary = temp / "test_master_sync_pdo"
+            binary = temp / "test_master_cfg"
             compile_cmd = [
                 compiler,
                 "-std=c11",
@@ -56,26 +57,14 @@ class MasterSyncPdoHostHarnessTests(unittest.TestCase):
                 capture_output=True,
             )
 
-        for name in (
-            "sync-bind-before-service-creation",
-            "sync-bind-ownership",
-            "sync-callback-registration-and-snapshot",
-            "public-owner-command-wiring",
-            "sync-period-control",
-            "pdo-transmission-control",
-            "pdo-rejected-values-preserve-state",
-            "tpdo-mode-transition-clears-transient-state",
-            "rpdo-mode-transition-drops-pending-frame",
-            "tpdo-sync-to-sync-restart-clears-transient-state",
-            "rpdo-sync-to-sync-restart-drops-pending-frame",
-            "pdo-restart-failure-rolls-back",
-            "rpdo-restart-failure-rolls-back",
-            "pdo-rollback-restart-failure-fails-closed",
-            "tpdo-event-modes",
-            "owner-thread-wait-rejected",
-        ):
-            self.assertIn(f"PASS {name}", completed.stdout)
-        self.assertIn("Passed 16/16 host SYNC/PDO cases", completed.stdout)
+        self.assertIn("PASS registration-and-framing", completed.stdout)
+        self.assertIn("PASS manual-only-auto-cfg", completed.stdout)
+        self.assertIn("PASS manual-success-diagnostic", completed.stdout)
+        self.assertIn("PASS manual-abort-diagnostic", completed.stdout)
+        self.assertIn("PASS local-reset-barrier", completed.stdout)
+        self.assertIn("PASS nmt-destroy-barrier", completed.stdout)
+        self.assertIn("PASS stopped-not-barrier", completed.stdout)
+        self.assertIn("Passed 7/7 host CFG cases", completed.stdout)
 
 
 if __name__ == "__main__":

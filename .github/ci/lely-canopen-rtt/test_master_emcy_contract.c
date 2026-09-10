@@ -255,7 +255,7 @@ lely_rtt_master_command_post(struct lely_rtt_runtime *runtime,
     return -RT_EBUSY;
 }
 
-#include "../../port/rtthread/src/master_emcy.c"
+#include "../../../port/rtthread/src/master_emcy.c"
 
 static int
 expect_true(int condition, const char *message)

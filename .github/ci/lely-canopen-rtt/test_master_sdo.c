@@ -482,7 +482,7 @@ lely_rtt_master_command_post(struct lely_rtt_runtime *runtime,
     return RT_EOK;
 }
 
-#include "../../port/rtthread/src/master_sdo.c"
+#include "../../../port/rtthread/src/master_sdo.c"
 
 #define CHECK(name, condition) \
     do { \

@@ -10,7 +10,7 @@ import textwrap
 import unittest
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 RUNTIME_C = REPO_ROOT / "port" / "rtthread" / "src" / "runtime.c"
 TIMER_C = REPO_ROOT / "port" / "rtthread" / "src" / "timer.c"
 MASTER_SDO_C = REPO_ROOT / "port" / "rtthread" / "src" / "master_sdo.c"

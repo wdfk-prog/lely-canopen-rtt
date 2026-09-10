@@ -21,8 +21,8 @@ def find_host_compiler():
 
 class MasterSdoHostHarnessTests(unittest.TestCase):
     def test_master_sdo_host_harness(self):
-        repo_root = Path(__file__).resolve().parents[2]
-        source = repo_root / "tests" / "host" / "test_master_sdo.c"
+        repo_root = Path(__file__).resolve().parents[3]
+        source = Path(__file__).resolve().with_suffix(".c")
         compiler = find_host_compiler()
         if not compiler:
             self.fail("host C compiler not found; set HOST_CC to a native compiler executable")

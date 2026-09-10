@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 COMPACTOR_PATH = REPO_ROOT / "tools" / "compact_master_dcf.py"
 NORMALIZER_PATH = REPO_ROOT / "tools" / "normalize_sdev_compact_defaults.py"
 MASTER_DCF = REPO_ROOT / "examples" / "master_node1" / "master.dcf"

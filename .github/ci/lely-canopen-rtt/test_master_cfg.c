@@ -207,7 +207,7 @@ void lely_rtt_master_sync_fini(struct lely_rtt_master_sync *sync);
 rt_err_t lely_rtt_master_command_post(struct lely_rtt_runtime *runtime,
         const struct lely_rtt_master_command *command);
 
-#include "../../port/rtthread/src/master_cfg.c"
+#include "../../../port/rtthread/src/master_cfg.c"
 
 static const rt_uint8_t valid_dcf[] = {
     0x01, 0x00, 0x00, 0x00,

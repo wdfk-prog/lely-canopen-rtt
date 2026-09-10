@@ -8,8 +8,8 @@ import tempfile
 import unittest
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-SOURCE = REPO_ROOT / "tests" / "host" / "test_master_emcy_contract.c"
+REPO_ROOT = Path(__file__).resolve().parents[3]
+SOURCE = Path(__file__).resolve().with_suffix(".c")
 
 
 def find_host_compiler():

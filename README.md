@@ -32,7 +32,7 @@ lely-canopen-rtt/
 │   └── node1/                     # Remote Node1 DCF fixture
 ├── metadata/                      # Upstream identity and source-selection policy
 ├── tools/                         # Host generation and vendor-maintenance tools
-├── tests/host/                    # Host/source-level regression tests
+├── .github/ci/lely-canopen-rtt/   # Host/source-level CI regression tests
 └── docs/
     ├── en/                        # English manual
     └── zh/                        # 中文手册

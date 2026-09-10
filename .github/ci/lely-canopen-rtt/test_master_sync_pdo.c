@@ -612,9 +612,9 @@ co_tpdo_event(co_tpdo_t *pdo)
     return 0;
 }
 
-#include "../../port/rtthread/src/master_command.c"
-#include "../../port/rtthread/src/master_sync.c"
-#include "../../port/rtthread/src/master_pdo.c"
+#include "../../../port/rtthread/src/master_command.c"
+#include "../../../port/rtthread/src/master_sync.c"
+#include "../../../port/rtthread/src/master_pdo.c"
 
 static void
 sync_callback(lely_rtt_runtime_t *runtime,

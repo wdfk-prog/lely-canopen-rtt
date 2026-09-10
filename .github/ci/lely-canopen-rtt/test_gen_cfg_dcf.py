@@ -9,7 +9,7 @@ import unittest
 from unittest import mock
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 GENERATOR_PATH = REPO_ROOT / "tools" / "gen_cfg_dcf.py"
 SPEC = importlib.util.spec_from_file_location("lely_gen_cfg_dcf_tested", GENERATOR_PATH)
 GENERATOR = importlib.util.module_from_spec(SPEC)
@@ -26,6 +26,10 @@ def make_dcf(*entries):
 
 
 VALID_DCF = make_dcf(make_entry(0x1017, 0, b"\xe8\x03"))
+
+
+def normalize_line_endings(data):
+    return data.replace(b"\r\n", b"\n")
 
 
 class GenCfgDcfTests(unittest.TestCase):
@@ -65,8 +69,14 @@ class GenCfgDcfTests(unittest.TestCase):
         header = GENERATOR.render_header("master_cfg_dcf", "master_node1_cfg_dcf")
         expected_c = REPO_ROOT / "examples" / "master_node1" / "master_cfg_dcf.c"
         expected_h = REPO_ROOT / "examples" / "master_node1" / "master_cfg_dcf.h"
-        self.assertEqual(expected_c.read_bytes(), GENERATOR._crlf_ascii(source))
-        self.assertEqual(expected_h.read_bytes(), GENERATOR._crlf_ascii(header))
+        self.assertEqual(
+            normalize_line_endings(expected_c.read_bytes()),
+            normalize_line_endings(GENERATOR._crlf_ascii(source)),
+        )
+        self.assertEqual(
+            normalize_line_endings(expected_h.read_bytes()),
+            normalize_line_endings(GENERATOR._crlf_ascii(header)),
+        )
 
     def test_publish_pair_restores_previous_pair_if_second_replace_fails(self):
         with tempfile.TemporaryDirectory(prefix="lely-cfg-publish-test-") as temp_dir:

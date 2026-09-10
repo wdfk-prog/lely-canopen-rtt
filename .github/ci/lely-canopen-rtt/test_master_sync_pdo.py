@@ -1,0 +1,82 @@
+# SPDX-License-Identifier: Apache-2.0
+
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+import unittest
+
+
+def find_host_compiler():
+    override = os.environ.get("HOST_CC")
+    if override:
+        return shutil.which(override)
+    for candidate in ("cc", "gcc", "clang"):
+        compiler = shutil.which(candidate)
+        if compiler:
+            return compiler
+    return None
+
+
+class MasterSyncPdoHostHarnessTests(unittest.TestCase):
+    def test_master_sync_pdo_host_harness(self):
+        repo_root = Path(__file__).resolve().parents[3]
+        source = Path(__file__).resolve().with_suffix(".c")
+        compiler = find_host_compiler()
+        if not compiler:
+            self.fail("host C compiler not found; set HOST_CC to a native compiler executable")
+
+        with tempfile.TemporaryDirectory(prefix="lely-master-sync-pdo-test-") as temp_dir:
+            temp = Path(temp_dir)
+            stub_dir = temp / "stubs" / "lely" / "co"
+            stub_dir.mkdir(parents=True)
+            for header in ("dev.h", "obj.h", "pdo.h", "rpdo.h", "sync.h", "tpdo.h"):
+                (stub_dir / header).write_text("\n", encoding="ascii")
+
+            binary = temp / "test_master_sync_pdo"
+            compile_cmd = [
+                compiler,
+                "-std=c11",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-I",
+                str(temp / "stubs"),
+                str(source),
+                "-o",
+                str(binary),
+            ]
+            subprocess.run(compile_cmd, cwd=repo_root, check=True)
+            completed = subprocess.run(
+                [str(binary)],
+                cwd=repo_root,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+
+        for name in (
+            "sync-bind-before-service-creation",
+            "sync-bind-ownership",
+            "sync-callback-registration-and-snapshot",
+            "public-owner-command-wiring",
+            "sync-period-control",
+            "pdo-transmission-control",
+            "pdo-rejected-values-preserve-state",
+            "tpdo-mode-transition-clears-transient-state",
+            "rpdo-mode-transition-drops-pending-frame",
+            "tpdo-sync-to-sync-restart-clears-transient-state",
+            "rpdo-sync-to-sync-restart-drops-pending-frame",
+            "pdo-restart-failure-rolls-back",
+            "rpdo-restart-failure-rolls-back",
+            "pdo-rollback-restart-failure-fails-closed",
+            "tpdo-event-modes",
+            "owner-thread-wait-rejected",
+        ):
+            self.assertIn(f"PASS {name}", completed.stdout)
+        self.assertIn("Passed 16/16 host SYNC/PDO cases", completed.stdout)
+
+
+if __name__ == "__main__":
+    unittest.main()

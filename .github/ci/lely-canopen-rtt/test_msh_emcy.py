@@ -12,7 +12,6 @@ def find_host_compiler():
     override = os.environ.get("HOST_CC")
     if override:
         return shutil.which(override)
-
     for candidate in ("cc", "gcc", "clang"):
         compiler = shutil.which(candidate)
         if compiler:
@@ -20,30 +19,38 @@ def find_host_compiler():
     return None
 
 
-class MasterCfgHostHarnessTests(unittest.TestCase):
-    def test_master_cfg_host_harness(self):
-        repo_root = Path(__file__).resolve().parents[2]
-        source = repo_root / "tests" / "host" / "test_master_cfg.c"
+class MshEmcyHostHarnessTests(unittest.TestCase):
+    def test_msh_emcy_host_harness(self):
+        repo_root = Path(__file__).resolve().parents[3]
+        source = Path(__file__).resolve().with_suffix(".c")
         compiler = find_host_compiler()
         if not compiler:
             self.fail("host C compiler not found; set HOST_CC to a native compiler executable")
 
-        with tempfile.TemporaryDirectory(prefix="lely-master-cfg-test-") as temp_dir:
+        with tempfile.TemporaryDirectory(prefix="lely-msh-emcy-test-") as temp_dir:
             temp = Path(temp_dir)
-            stub_dir = temp / "stubs" / "lely" / "co"
-            stub_dir.mkdir(parents=True)
-            for header in ("csdo.h", "dev.h", "obj.h"):
-                (stub_dir / header).write_text("\n", encoding="ascii")
+            stub_root = temp / "stubs"
+            for rel in (
+                "lely/co/dev.h",
+                "lely/co/nmt.h",
+                "lely/rtthread/runtime.h",
+                "finsh.h",
+                "rtthread.h",
+            ):
+                path = stub_root / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("\n", encoding="ascii")
 
-            binary = temp / "test_master_cfg"
+            binary = temp / "test_msh_emcy"
             compile_cmd = [
                 compiler,
                 "-std=c11",
                 "-Wall",
                 "-Wextra",
                 "-Werror",
+                "-Wno-unused-function",
                 "-I",
-                str(temp / "stubs"),
+                str(stub_root),
                 str(source),
                 "-o",
                 str(binary),
@@ -57,14 +64,10 @@ class MasterCfgHostHarnessTests(unittest.TestCase):
                 capture_output=True,
             )
 
-        self.assertIn("PASS registration-and-framing", completed.stdout)
-        self.assertIn("PASS manual-only-auto-cfg", completed.stdout)
-        self.assertIn("PASS manual-success-diagnostic", completed.stdout)
-        self.assertIn("PASS manual-abort-diagnostic", completed.stdout)
-        self.assertIn("PASS local-reset-barrier", completed.stdout)
-        self.assertIn("PASS nmt-destroy-barrier", completed.stdout)
-        self.assertIn("PASS stopped-not-barrier", completed.stdout)
-        self.assertIn("Passed 7/7 host CFG cases", completed.stdout)
+        self.assertIn("PASS push-hex-forms-and-boundaries", completed.stdout)
+        self.assertIn("PASS push-rejects-invalid-fields", completed.stdout)
+        self.assertIn("PASS pop-clear-and-query-routing", completed.stdout)
+        self.assertIn("Passed 3/3 host EMCY MSH cases", completed.stdout)
 
 
 if __name__ == "__main__":
