@@ -10,6 +10,7 @@
  * 2026-09-08     wdfk-prog         add SYNC and synchronous PDO application APIs
  * 2026-09-11     wdfk-prog         add custom Client-SDO routing and per-node FIFO
  * 2026-09-12     wdfk-prog         reject conflicting custom CSDO COB-IDs
+ * 2026-09-12     wdfk-prog         add application OD upload hooks and notifications
  */
 
 /**
@@ -618,6 +619,90 @@ struct lely_rtt_local_od_change {
     rt_uint32_t size; /**< Transfer size in bytes, saturated at UINT32_MAX. */
     rt_uint32_t sequence; /**< Increments for each stable published change. */
 };
+
+#if defined(PKG_LELY_USING_MASTER_OD_HOOKS)
+/**
+ * @brief Supply one dynamic local OD value to an SDO/PDO-style upload.
+ *
+ * The callback executes synchronously in the Lely owner thread. On success it
+ * returns zero and stores CANopen SDO-transfer encoded bytes in @p data/@p size.
+ * The runtime copies those bytes into the Lely upload request immediately after
+ * the callback returns. Therefore @p data must not point to callback-local
+ * automatic storage and must remain valid until the enclosing owner indication
+ * has finished. The byte count and encoding must remain compatible with the
+ * configured OD entry because the hook supplies transfer bytes directly. Return
+ * a standard CANopen SDO abort code to reject the upload.
+ *
+ * Keep the callback bounded and non-blocking. It must not call a runtime API
+ * that waits for owner-thread completion.
+ *
+ * @param runtime Runtime whose local OD is being read.
+ * @param index Manufacturer-specific object index.
+ * @param subindex Object sub-index.
+ * @param data Output pointer to upload bytes; may be RT_NULL when size is zero.
+ * @param size Output byte count.
+ * @param user Caller value registered with the callback.
+ * @return Zero on success or a CANopen SDO abort code.
+ */
+typedef rt_uint32_t lely_rtt_local_od_upload_ind_t(lely_rtt_runtime_t *runtime,
+        rt_uint16_t index, rt_uint8_t subindex, const void **data,
+        rt_size_t *size, void *user);
+
+/**
+ * @brief Notify the application after one local manufacturer OD write commits.
+ *
+ * The callback executes in the Lely owner thread after the existing download
+ * indication has accepted the final non-empty transfer and after the stable
+ * metadata snapshot has been published. It is notification-only and cannot
+ * veto a write that has already committed.
+ *
+ * Keep the callback bounded and non-blocking. It must not call a runtime API
+ * that waits for owner-thread completion.
+ *
+ * @param runtime Runtime whose local OD changed.
+ * @param change Stable metadata for the committed write.
+ * @param user Caller value registered with the callback.
+ */
+typedef void lely_rtt_local_od_change_ind_t(lely_rtt_runtime_t *runtime,
+        const struct lely_rtt_local_od_change *change, void *user);
+
+/**
+ * @brief Register or remove one dynamic local OD upload hook before start.
+ *
+ * Registration is startup-only and persists across stop/start cycles. Only the
+ * manufacturer-specific range 0x2000..0x5FFF is accepted. Passing RT_NULL for
+ * @p ind removes an existing registration for the entry. Runtime start fails
+ * if a registered entry does not exist in the configured local Master OD or is
+ * not readable. For a registered entry the application hook owns the upload
+ * value while the pre-existing Lely upload indication is restored on stop.
+ *
+ * @param runtime Stopped runtime handle.
+ * @param index Manufacturer-specific object index (0x2000..0x5FFF).
+ * @param subindex Object sub-index.
+ * @param ind Dynamic upload callback, or RT_NULL to remove it.
+ * @param user Caller value forwarded to @p ind.
+ * @return RT_EOK on success, -RT_ENOMEM on allocation failure, or -RT_EINVAL
+ *         for invalid input/runtime state.
+ */
+rt_err_t lely_rtt_runtime_configure_local_od_upload_ind(
+        lely_rtt_runtime_t *runtime, rt_uint16_t index, rt_uint8_t subindex,
+        lely_rtt_local_od_upload_ind_t *ind, void *user);
+
+/**
+ * @brief Register the optional successful local OD write notification.
+ *
+ * Registration is startup-only and persists across stop/start cycles. Passing
+ * RT_NULL disables the callback while the polling snapshot remains enabled.
+ *
+ * @param runtime Stopped runtime handle.
+ * @param ind Optional bounded owner-thread notification callback.
+ * @param user Caller value forwarded to @p ind.
+ * @return RT_EOK on success or -RT_EINVAL for an invalid runtime/state.
+ */
+rt_err_t lely_rtt_runtime_configure_local_od_change_ind(
+        lely_rtt_runtime_t *runtime, lely_rtt_local_od_change_ind_t *ind,
+        void *user);
+#endif /* defined(PKG_LELY_USING_MASTER_OD_HOOKS) */
 
 /**
  * @brief Copy one manufacturer-specific local OD value through the owner.

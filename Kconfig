@@ -291,6 +291,18 @@ config PKG_LELY_USING_LOCAL_OD
         and RPDO writes remain intact and publish a metadata change snapshot
         that application threads can observe without touching co_dev directly.
 
+config PKG_LELY_USING_MASTER_OD_HOOKS
+    bool "Enable application OD upload hooks and write notification"
+    default n
+    depends on PKG_LELY_USING_LOCAL_OD
+    depends on PKG_LELY_USING_CO_OBJ_UPLOAD
+    help
+        Allow startup-only application registration of dynamic upload hooks for
+        manufacturer-specific local OD entries and one successful-write
+        notification callback. Hooks execute only in the Lely owner thread;
+        raw co_dev/co_sub pointers remain private to the runtime. Existing
+        download indications still validate/commit writes before notification.
+
 config PKG_LELY_USING_MASTER_PDO_TX
     bool "Enable Master TPDO event trigger bridge"
     default n

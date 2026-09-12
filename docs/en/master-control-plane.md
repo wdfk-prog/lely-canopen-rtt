@@ -65,9 +65,18 @@ Reset/stop transitions, remote Boot-up, and manual NMT configuration cancel or b
 
 The current bridge rejects the `0x1F8A` restore/reset path because it conflicts with the runtime's Master Boot-up/NMT-boot ownership model.
 
-## 5. Local OD and TPDO
+## 5. Local OD, application hooks, and TPDO
 
 `PKG_LELY_USING_LOCAL_OD` provides synchronous owner-dispatched read/write for local `0x2000..0x5FFF` objects.
+
+`PKG_LELY_USING_MASTER_OD_HOOKS` adds two startup-only application integration points on top of that bridge:
+
+- `lely_rtt_runtime_configure_local_od_upload_ind()` supplies a dynamic upload value for one manufacturer OD entry;
+- `lely_rtt_runtime_configure_local_od_change_ind()` notifies the application immediately after a successful local/protocol write commits.
+
+The upload hook replaces the registered entry's upload indication for the current runtime run and the previous Lely indication is restored on stop; the registration itself persists across stop/start. Callback bytes use CANopen SDO transfer encoding. Successful-write notification runs after snapshot publication, is notification-only, and cannot roll back a committed write.
+
+Both callbacks execute in the Lely owner thread and must remain bounded/non-blocking. They must not call runtime APIs that wait for owner completion. Unregistered entries keep their existing behavior and raw `co_dev_t/co_sub_t` ownership is never exposed to the application.
 
 `PKG_LELY_USING_MASTER_PDO_TX` lets application code trigger an already configured static Master TPDO. The normal pattern is:
 
@@ -142,4 +151,4 @@ Only commands backed by enabled Kconfig features are printed/accepted. Scalar MS
 
 ## 10. What the control plane does not provide
 
-The current API deliberately does not expose raw Lely Client-SDO ownership, runtime mutation of custom `0x1280..0x12FF` communication parameters, general dynamic PDO remapping, or an automatic wall-clock synchronization policy. Custom CSDO selection is limited to the startup-only numbered-channel selector described above; direct use of the same raw Lely CSDO while application requests are active remains outside the contract.
+The current API deliberately does not expose raw Lely Client-SDO/OD ownership, runtime mutation of custom `0x1280..0x12FF` communication parameters, general dynamic PDO remapping, or an automatic wall-clock synchronization policy. The application OD write callback is currently a post-commit notification rather than a second pre-commit download validator. Custom CSDO selection is limited to the startup-only numbered-channel selector described above; direct use of the same raw Lely CSDO while application requests are active remains outside the contract.

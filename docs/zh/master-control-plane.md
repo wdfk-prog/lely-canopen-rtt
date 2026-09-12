@@ -65,9 +65,18 @@ reset/stop、remote Boot-up 与 manual NMT configuration 会在整个节点级 a
 
 当前 bridge 拒绝 `0x1F8A` restore/reset path，因为该路径与现有 Master Boot-up/NMT-boot ownership 模型冲突。
 
-## 5. Local OD 与 TPDO
+## 5. Local OD、application hooks 与 TPDO
 
 `PKG_LELY_USING_LOCAL_OD` 提供本地 `0x2000..0x5FFF` 对象的同步 owner-dispatched read/write。
+
+`PKG_LELY_USING_MASTER_OD_HOOKS` 在这个 bridge 上增加两类 startup-only application integration：
+
+- `lely_rtt_runtime_configure_local_od_upload_ind()`：为一个 manufacturer OD entry 提供动态 upload 值；
+- `lely_rtt_runtime_configure_local_od_change_ind()`：在成功 local/protocol write commit 后立即通知 application。
+
+upload hook 替代被注册 entry 在本次 runtime run 中的 upload indication，stop 时恢复之前的 Lely indication；注册本身跨 stop/start 保留。callback 返回的 bytes 使用 CANopen SDO transfer encoding。成功写入 notification 在 snapshot 发布之后执行，只用于通知，不能撤销已经提交的写入。
+
+两类 callback 都在 Lely owner thread 中执行，必须 bounded/non-blocking，不能调用会等待 owner completion 的 runtime API。未注册 entry 的现有行为不变，也不会向 application 暴露 raw `co_dev_t/co_sub_t`。
 
 `PKG_LELY_USING_MASTER_PDO_TX` 用于触发已经配置好的 static Master TPDO。典型路径：
 
@@ -142,4 +151,4 @@ co sdo write <node> <index> <subindex> <type> <value> <timeout-ms>
 
 ## 10. 当前不提供什么
 
-现 API 有意不暴露 raw Lely Client-SDO ownership、运行期修改 custom `0x1280..0x12FF` communication parameter、通用 dynamic PDO remapping，也没有自动 wall-clock synchronization policy。Custom CSDO 只通过上述 startup-only channel selector 选择；application request active 期间直接操作同一个 raw Lely CSDO 仍不在公开契约内。
+现 API 有意不暴露 raw Lely Client-SDO/OD ownership、运行期修改 custom `0x1280..0x12FF` communication parameter、通用 dynamic PDO remapping，也没有自动 wall-clock synchronization policy。Application OD write callback 当前是 post-commit notification，不是第二套 pre-commit download validator。Custom CSDO 只通过上述 startup-only channel selector 选择；application request active 期间直接操作同一个 raw Lely CSDO 仍不在公开契约内。

@@ -95,6 +95,12 @@ When `PKG_LELY_USING_LOCAL_OD` is enabled, application/MSH threads may access on
 
 The request crosses the owner queue and the actual `co_dev_t` access happens in the Lely owner thread. Existing Lely download indications are chained so Server-SDO and RPDO writes continue to work. The bridge publishes metadata for the most recent observed local write without exposing `co_dev_t` to non-owner code.
 
+When a product needs runtime MCU application state to act as an OD read value, enable `PKG_LELY_USING_MASTER_OD_HOOKS`. `lely_rtt_runtime_configure_local_od_upload_ind()` registers a startup-only dynamic upload hook by index/sub-index. Server-SDO, TPDO, and owner-safe local reads observe that value whenever they reach the same `co_sub_up_ind()` path. Registrations are rebound on each runtime start, original upload indications are restored on stop, and the registration itself persists across stop/start cycles.
+
+The same option provides `lely_rtt_runtime_configure_local_od_change_ind()`. It notifies the application in the owner thread only after the existing download indication accepts and commits the final non-empty write and after the metadata snapshot is stable. The notification cannot veto an already committed write; type/range/business rejection that must happen before commit remains the responsibility of the OD/Lely download indication.
+
+Both callback classes run in the Lely owner thread and must stay bounded/non-blocking. They must not call runtime APIs that wait for owner completion. The public API never returns `co_dev_t` or `co_sub_t`.
+
 This API is not a generic remote OD API. Remote objects are read or written through Client-SDO.
 
 ## 6. Static mapping versus dynamic reconfiguration

@@ -61,6 +61,7 @@ Master control plane 是逐项叠加的：
 | remote SDO upload/download | `PKG_LELY_USING_MASTER_SDO` |
 | 手动 remote configuration | `PKG_LELY_USING_MASTER_NMT_CFG` |
 | 本地 manufacturer OD 访问 | `PKG_LELY_USING_LOCAL_OD` |
+| 动态 local OD upload + 写入通知 | `PKG_LELY_USING_MASTER_OD_HOOKS` |
 | 触发静态 Master TPDO | `PKG_LELY_USING_MASTER_PDO_TX` |
 | SYNC 与同步 PDO 控制 | `PKG_LELY_USING_MASTER_SYNC_PDO` |
 | EMCY bridge | `PKG_LELY_USING_MASTER_EMCY` |

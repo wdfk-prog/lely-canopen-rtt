@@ -148,6 +148,9 @@ struct lely_rtt_master_cfg_source;
 #if defined(PKG_LELY_USING_LOCAL_OD)
 struct lely_rtt_local_od_request;
 struct lely_rtt_local_od_hook;
+#if defined(PKG_LELY_USING_MASTER_OD_HOOKS)
+struct lely_rtt_local_od_app_hook;
+#endif /* defined(PKG_LELY_USING_MASTER_OD_HOOKS) */
 #endif /* defined(PKG_LELY_USING_LOCAL_OD) */
 #if defined(PKG_LELY_USING_MASTER_PDO_TX)
 struct lely_rtt_master_pdo_request;
@@ -315,6 +318,14 @@ struct lely_rtt_runtime {
 #if defined(PKG_LELY_USING_LOCAL_OD)
     /** Owner-owned chain restoring pre-existing manufacturer OD download hooks. */
     struct lely_rtt_local_od_hook *local_od_hooks;
+#if defined(PKG_LELY_USING_MASTER_OD_HOOKS)
+    /** Startup-owned dynamic upload registrations retained across stop/start. */
+    struct lely_rtt_local_od_app_hook *local_od_app_hooks;
+    /** Optional owner-thread notification after one manufacturer OD write. */
+    lely_rtt_local_od_change_ind_t *local_od_change_ind;
+    /** Caller-owned argument paired with local_od_change_ind. */
+    void *local_od_change_data;
+#endif /* defined(PKG_LELY_USING_MASTER_OD_HOOKS) */
     /** Owner-only marker classifying writes issued by the public local OD API. */
     rt_bool_t local_od_api_write_active;
     /** Even non-zero value identifies a stable local OD change snapshot. */
@@ -577,6 +588,8 @@ void lely_rtt_local_od_dispatch(struct lely_rtt_runtime *runtime,
         struct lely_rtt_local_od_request *request);
 /** @brief Complete a local OD request that never reached the owner. */
 void lely_rtt_local_od_cancel_queued(struct lely_rtt_local_od_request *request);
+
+void lely_rtt_local_od_app_hooks_fini(struct lely_rtt_runtime *runtime);
 #else
 static inline void
 lely_rtt_local_od_reset(struct lely_rtt_runtime *runtime)
@@ -593,6 +606,12 @@ lely_rtt_local_od_bind(struct lely_rtt_runtime *runtime)
 
 static inline void
 lely_rtt_local_od_unbind(struct lely_rtt_runtime *runtime)
+{
+    (void)runtime;
+}
+
+static inline void
+lely_rtt_local_od_app_hooks_fini(struct lely_rtt_runtime *runtime)
 {
     (void)runtime;
 }

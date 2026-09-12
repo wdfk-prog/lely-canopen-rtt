@@ -64,6 +64,7 @@ PKG_LELY_USING_MASTER_COMMAND
     +-- PKG_LELY_USING_MASTER_SDO
     +-- PKG_LELY_USING_MASTER_NMT_CFG
     +-- PKG_LELY_USING_LOCAL_OD
+          +-- PKG_LELY_USING_MASTER_OD_HOOKS
           +-- PKG_LELY_USING_MASTER_PDO_TX
           +-- PKG_LELY_USING_MASTER_SYNC_PDO
     +-- PKG_LELY_USING_MASTER_EMCY
@@ -75,6 +76,8 @@ PKG_LELY_USING_MASTER_COMMAND
 `PKG_LELY_MASTER_COMMAND_QUEUE_DEPTH` 默认 8，用来限制等待 owner dispatch 的复制 command 数。
 
 启用 `PKG_LELY_USING_MASTER_SDO` 时，`PKG_LELY_MASTER_SDO_QUEUE_DEPTH` 默认 4，用于限制每个节点在单个 active request 之后继续等待的 SDO request 数，合法范围为 1..16。这个 FIFO 与全局 Master command queue 相互独立。
+
+`PKG_LELY_USING_MASTER_OD_HOOKS` 依赖 local OD bridge 和 Lely OD upload indication。它只增加 startup-only application hook/notification，不把 `co_dev_t`/`co_sub_t` ownership 暴露给 application thread。
 
 `PKG_LELY_USING_MASTER_EMCY` 使用固定大小的 per-runtime history；`PKG_LELY_MASTER_EMCY_HISTORY_DEPTH` 默认 8，范围 1..32。
 

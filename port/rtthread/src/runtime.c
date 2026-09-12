@@ -1113,6 +1113,7 @@ lely_rtt_runtime_destroy(lely_rtt_runtime_t *runtime)
     runtime->master_sdev = RT_NULL;
     /* owner_thread == NULL is the final callback barrier for copied sources. */
     lely_rtt_master_cfg_sources_fini(runtime);
+    lely_rtt_local_od_app_hooks_fini(runtime);
 
     if (runtime->event_initialized) {
         rt_event_detach(&runtime->event);

@@ -5,6 +5,7 @@
  * Date           Author            Notes
  * 2026-09-05     wdfk-prog         first version
  * 2026-09-06     wdfk-prog         avoid snapshot retry priority livelock
+ * 2026-09-12     wdfk-prog         add application upload hooks and notification
  */
 
 /**
@@ -26,14 +27,24 @@
 #define LELY_RTT_LOCAL_OD_INDEX_MIN 0x2000u
 #define LELY_RTT_LOCAL_OD_INDEX_MAX 0x5fffu
 
+#if defined(PKG_LELY_USING_MASTER_OD_HOOKS)
+/** @brief Persistent startup registration for one dynamic application upload. */
+struct lely_rtt_local_od_app_hook {
+    struct lely_rtt_local_od_app_hook *next;
+    rt_uint16_t index;
+    rt_uint8_t subindex;
+    lely_rtt_local_od_upload_ind_t *ind;
+    void *data;
+};
+#endif /* defined(PKG_LELY_USING_MASTER_OD_HOOKS) */
+
 /**
- * @brief One owner-owned wrapper around an existing OD download indication.
+ * @brief One owner-owned wrapper around existing OD indications.
  *
- * The wrapper never replaces application/protocol behavior. It first invokes
- * the indication that was present when the Master became ready and publishes
- * metadata only after that indication accepts a non-empty final transfer
- * segment. Zero-length/preflight indications are deliberately not reported as
- * application-visible value changes.
+ * Download observation always invokes the indication that was present when the
+ * Master became ready and publishes metadata only after that indication accepts
+ * a non-empty final transfer segment. Optional application uploads deliberately
+ * override the entry's upload indication while bound and restore it on stop.
  */
 struct lely_rtt_local_od_hook {
     struct lely_rtt_local_od_hook *next;
@@ -41,6 +52,11 @@ struct lely_rtt_local_od_hook {
     co_sub_t *sub;
     co_sub_dn_ind_t *previous;
     void *previous_data;
+#if defined(PKG_LELY_USING_MASTER_OD_HOOKS)
+    struct lely_rtt_local_od_app_hook *app;
+    co_sub_up_ind_t *previous_up;
+    void *previous_up_data;
+#endif /* defined(PKG_LELY_USING_MASTER_OD_HOOKS) */
 };
 
 enum lely_rtt_local_od_operation {
@@ -60,6 +76,23 @@ struct lely_rtt_local_od_request {
     rt_uint32_t abort_code;
 };
 
+#if defined(PKG_LELY_USING_MASTER_OD_HOOKS)
+/** @brief Locate the persistent upload registration for one OD entry. */
+static struct lely_rtt_local_od_app_hook *
+lely_rtt_local_od_find_app_hook(struct lely_rtt_runtime *runtime,
+        rt_uint16_t index, rt_uint8_t subindex)
+{
+    struct lely_rtt_local_od_app_hook *hook;
+
+    for (hook = runtime ? runtime->local_od_app_hooks : RT_NULL; hook;
+            hook = hook->next) {
+        if (hook->index == index && hook->subindex == subindex)
+            return hook;
+    }
+    return RT_NULL;
+}
+#endif /* defined(PKG_LELY_USING_MASTER_OD_HOOKS) */
+
 /** @brief Publish one successful manufacturer OD write through an atomic seqlock. */
 static void
 lely_rtt_local_od_publish(struct lely_rtt_runtime *runtime, co_sub_t *sub,
@@ -69,6 +102,9 @@ lely_rtt_local_od_publish(struct lely_rtt_runtime *runtime, co_sub_t *sub,
     rt_uint32_t seq;
     rt_uint32_t size;
     rt_uint32_t source;
+#if defined(PKG_LELY_USING_MASTER_OD_HOOKS)
+    struct lely_rtt_local_od_change change;
+#endif /* defined(PKG_LELY_USING_MASTER_OD_HOOKS) */
 
     if (!runtime || !sub || !req)
         return;
@@ -97,6 +133,18 @@ lely_rtt_local_od_publish(struct lely_rtt_runtime *runtime, co_sub_t *sub,
     rt_atomic_store(&runtime->local_od_change_source, (rt_atomic_t)source);
     rt_atomic_store(&runtime->local_od_change_size, (rt_atomic_t)size);
     rt_atomic_store(&runtime->local_od_change_seq, (rt_atomic_t)(seq + 2u));
+
+#if defined(PKG_LELY_USING_MASTER_OD_HOOKS)
+    if (runtime->local_od_change_ind) {
+        change.index = (rt_uint16_t)co_obj_get_idx(obj);
+        change.subindex = (rt_uint8_t)co_sub_get_subidx(sub);
+        change.source = (enum lely_rtt_local_od_change_source)source;
+        change.size = size;
+        change.sequence = (seq + 2u) / 2u;
+        runtime->local_od_change_ind(runtime, &change,
+                runtime->local_od_change_data);
+    }
+#endif /* defined(PKG_LELY_USING_MASTER_OD_HOOKS) */
 }
 
 /** @brief Chain one manufacturer OD download and publish successful final writes. */
@@ -113,6 +161,109 @@ lely_rtt_local_od_dn_ind(co_sub_t *sub, struct co_sdo_req *req, void *data)
     if (!ac && req && req->nbyte && co_sdo_req_last(req))
         lely_rtt_local_od_publish(hook->runtime, sub, req);
     return ac;
+}
+
+#if defined(PKG_LELY_USING_MASTER_OD_HOOKS)
+/** @brief Serve one registered dynamic application value through Lely upload. */
+static co_unsigned32_t
+lely_rtt_local_od_up_ind(const co_sub_t *sub, struct co_sdo_req *req, void *data)
+{
+    struct lely_rtt_local_od_hook *hook = data;
+    const void *ptr = RT_NULL;
+    rt_size_t size = 0;
+    rt_uint32_t result;
+    co_unsigned32_t ac = 0;
+
+    if (!sub || !req || !hook || !hook->runtime || !hook->app
+            || !hook->app->ind)
+        return CO_SDO_AC_ERROR;
+
+    result = hook->app->ind(hook->runtime, hook->app->index,
+            hook->app->subindex, &ptr, &size, hook->app->data);
+    if (result)
+        return (co_unsigned32_t)result;
+    if (size && !ptr)
+        return CO_SDO_AC_ERROR;
+    if (co_sdo_req_up(req, ptr, (size_t)size, &ac) == -1)
+        return ac ? ac : CO_SDO_AC_ERROR;
+    return 0;
+}
+
+rt_err_t
+lely_rtt_runtime_configure_local_od_upload_ind(lely_rtt_runtime_t *runtime,
+        rt_uint16_t index, rt_uint8_t subindex,
+        lely_rtt_local_od_upload_ind_t *ind, void *user)
+{
+    struct lely_rtt_local_od_app_hook **link;
+    struct lely_rtt_local_od_app_hook *hook;
+
+    if (!runtime || !runtime->event_initialized || runtime->owner_thread
+            || index < LELY_RTT_LOCAL_OD_INDEX_MIN
+            || index > LELY_RTT_LOCAL_OD_INDEX_MAX)
+        return -RT_EINVAL;
+
+    link = &runtime->local_od_app_hooks;
+    while (*link && ((*link)->index != index || (*link)->subindex != subindex))
+        link = &(*link)->next;
+
+    hook = *link;
+    if (!ind) {
+        if (hook) {
+            *link = hook->next;
+            rt_free(hook);
+        }
+        return RT_EOK;
+    }
+
+    if (!hook) {
+        hook = rt_calloc(1, sizeof(*hook));
+        if (!hook)
+            return -RT_ENOMEM;
+        hook->index = index;
+        hook->subindex = subindex;
+        hook->next = runtime->local_od_app_hooks;
+        runtime->local_od_app_hooks = hook;
+    }
+    hook->ind = ind;
+    hook->data = user;
+    return RT_EOK;
+}
+
+rt_err_t
+lely_rtt_runtime_configure_local_od_change_ind(lely_rtt_runtime_t *runtime,
+        lely_rtt_local_od_change_ind_t *ind, void *user)
+{
+    if (!runtime || !runtime->event_initialized || runtime->owner_thread)
+        return -RT_EINVAL;
+
+    runtime->local_od_change_ind = ind;
+    runtime->local_od_change_data = ind ? user : RT_NULL;
+    return RT_EOK;
+}
+#endif /* defined(PKG_LELY_USING_MASTER_OD_HOOKS) */
+
+void
+lely_rtt_local_od_app_hooks_fini(struct lely_rtt_runtime *runtime)
+{
+#if defined(PKG_LELY_USING_MASTER_OD_HOOKS)
+    struct lely_rtt_local_od_app_hook *hook;
+
+    if (!runtime)
+        return;
+
+    hook = runtime->local_od_app_hooks;
+    runtime->local_od_app_hooks = RT_NULL;
+    while (hook) {
+        struct lely_rtt_local_od_app_hook *next = hook->next;
+
+        rt_free(hook);
+        hook = next;
+    }
+    runtime->local_od_change_ind = RT_NULL;
+    runtime->local_od_change_data = RT_NULL;
+#else
+    (void)runtime;
+#endif /* defined(PKG_LELY_USING_MASTER_OD_HOOKS) */
 }
 
 void
@@ -141,15 +292,28 @@ lely_rtt_local_od_unbind(struct lely_rtt_runtime *runtime)
     runtime->local_od_hooks = RT_NULL;
     while (hook) {
         struct lely_rtt_local_od_hook *next = hook->next;
-        co_sub_dn_ind_t *current = RT_NULL;
-        void *current_data = RT_NULL;
+        co_sub_dn_ind_t *current_dn = RT_NULL;
+        void *current_dn_data = RT_NULL;
 
-        if (hook->sub) {
-            co_sub_get_dn_ind(hook->sub, &current, &current_data);
-            if (current == &lely_rtt_local_od_dn_ind && current_data == hook)
+        if (hook->sub && hook->previous) {
+            co_sub_get_dn_ind(hook->sub, &current_dn, &current_dn_data);
+            if (current_dn == &lely_rtt_local_od_dn_ind
+                    && current_dn_data == hook)
                 co_sub_set_dn_ind(hook->sub, hook->previous,
                         hook->previous_data);
         }
+#if defined(PKG_LELY_USING_MASTER_OD_HOOKS)
+        if (hook->sub && hook->app && hook->previous_up) {
+            co_sub_up_ind_t *current_up = RT_NULL;
+            void *current_up_data = RT_NULL;
+
+            co_sub_get_up_ind(hook->sub, &current_up, &current_up_data);
+            if (current_up == &lely_rtt_local_od_up_ind
+                    && current_up_data == hook)
+                co_sub_set_up_ind(hook->sub, hook->previous_up,
+                        hook->previous_up_data);
+        }
+#endif /* defined(PKG_LELY_USING_MASTER_OD_HOOKS) */
         rt_free(hook);
         hook = next;
     }
@@ -165,6 +329,23 @@ lely_rtt_local_od_bind(struct lely_rtt_runtime *runtime)
         return -RT_EINVAL;
 
     lely_rtt_local_od_reset(runtime);
+#if defined(PKG_LELY_USING_MASTER_OD_HOOKS)
+    {
+        struct lely_rtt_local_od_app_hook *app;
+
+        for (app = runtime->local_od_app_hooks; app; app = app->next) {
+            co_sub_t *registered = co_dev_find_sub(runtime->master_dev,
+                    app->index, app->subindex);
+
+            if (!registered || !(co_sub_get_access(registered) & CO_ACCESS_READ)) {
+                LELY_RTT_LOG_E("local OD upload hook target %04x:%02x is unavailable or unreadable",
+                        app->index, app->subindex);
+                return -RT_ERROR;
+            }
+        }
+    }
+#endif /* defined(PKG_LELY_USING_MASTER_OD_HOOKS) */
+
     for (obj = co_dev_first_obj(runtime->master_dev); obj;
             obj = co_obj_next(obj)) {
         co_unsigned16_t index = co_obj_get_idx(obj);
@@ -176,8 +357,18 @@ lely_rtt_local_od_bind(struct lely_rtt_runtime *runtime)
 
         for (sub = co_obj_first_sub(obj); sub; sub = co_sub_next(sub)) {
             struct lely_rtt_local_od_hook *hook;
+#if defined(PKG_LELY_USING_MASTER_OD_HOOKS)
+            struct lely_rtt_local_od_app_hook *app =
+                    lely_rtt_local_od_find_app_hook(runtime,
+                            (rt_uint16_t)index,
+                            (rt_uint8_t)co_sub_get_subidx(sub));
+#endif /* defined(PKG_LELY_USING_MASTER_OD_HOOKS) */
 
+#if defined(PKG_LELY_USING_MASTER_OD_HOOKS)
+            if (!(co_sub_get_access(sub) & CO_ACCESS_WRITE) && !app)
+#else
             if (!(co_sub_get_access(sub) & CO_ACCESS_WRITE))
+#endif /* defined(PKG_LELY_USING_MASTER_OD_HOOKS) */
                 continue;
 
             hook = rt_calloc(1, sizeof(*hook));
@@ -188,16 +379,38 @@ lely_rtt_local_od_bind(struct lely_rtt_runtime *runtime)
 
             hook->runtime = runtime;
             hook->sub = sub;
-            co_sub_get_dn_ind(sub, &hook->previous, &hook->previous_data);
-            if (!hook->previous) {
-                rt_free(hook);
-                lely_rtt_local_od_unbind(runtime);
-                return -RT_ERROR;
+#if defined(PKG_LELY_USING_MASTER_OD_HOOKS)
+            hook->app = app;
+#endif /* defined(PKG_LELY_USING_MASTER_OD_HOOKS) */
+
+            if (co_sub_get_access(sub) & CO_ACCESS_WRITE) {
+                co_sub_get_dn_ind(sub, &hook->previous, &hook->previous_data);
+                if (!hook->previous) {
+                    rt_free(hook);
+                    lely_rtt_local_od_unbind(runtime);
+                    return -RT_ERROR;
+                }
             }
+#if defined(PKG_LELY_USING_MASTER_OD_HOOKS)
+            if (app) {
+                co_sub_get_up_ind(sub, &hook->previous_up,
+                        &hook->previous_up_data);
+                if (!hook->previous_up) {
+                    rt_free(hook);
+                    lely_rtt_local_od_unbind(runtime);
+                    return -RT_ERROR;
+                }
+            }
+#endif /* defined(PKG_LELY_USING_MASTER_OD_HOOKS) */
 
             hook->next = runtime->local_od_hooks;
             runtime->local_od_hooks = hook;
-            co_sub_set_dn_ind(sub, &lely_rtt_local_od_dn_ind, hook);
+            if (hook->previous)
+                co_sub_set_dn_ind(sub, &lely_rtt_local_od_dn_ind, hook);
+#if defined(PKG_LELY_USING_MASTER_OD_HOOKS)
+            if (app)
+                co_sub_set_up_ind(sub, &lely_rtt_local_od_up_ind, hook);
+#endif /* defined(PKG_LELY_USING_MASTER_OD_HOOKS) */
         }
     }
 

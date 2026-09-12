@@ -64,6 +64,7 @@ PKG_LELY_USING_MASTER_COMMAND
     +-- PKG_LELY_USING_MASTER_SDO
     +-- PKG_LELY_USING_MASTER_NMT_CFG
     +-- PKG_LELY_USING_LOCAL_OD
+          +-- PKG_LELY_USING_MASTER_OD_HOOKS
           +-- PKG_LELY_USING_MASTER_PDO_TX
           +-- PKG_LELY_USING_MASTER_SYNC_PDO
     +-- PKG_LELY_USING_MASTER_EMCY
@@ -75,6 +76,8 @@ PKG_LELY_USING_MASTER_COMMAND
 `PKG_LELY_MASTER_COMMAND_QUEUE_DEPTH` defaults to 8 and bounds copied commands waiting for owner dispatch.
 
 When `PKG_LELY_USING_MASTER_SDO` is enabled, `PKG_LELY_MASTER_SDO_QUEUE_DEPTH` defaults to 4 and limits the additional per-node SDO requests waiting behind the single active request. Its valid range is 1..16. This FIFO is separate from the global Master command queue.
+
+`PKG_LELY_USING_MASTER_OD_HOOKS` depends on the local OD bridge and Lely OD upload indications. It adds startup-only application hooks/notification without exposing `co_dev_t` or `co_sub_t` ownership to application threads.
 
 `PKG_LELY_USING_MASTER_EMCY` uses a fixed-size per-runtime history. `PKG_LELY_MASTER_EMCY_HISTORY_DEPTH` defaults to 8 and is limited to 1..32.
 

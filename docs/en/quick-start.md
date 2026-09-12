@@ -61,6 +61,7 @@ The Master control plane is intentionally additive. Typical combinations are:
 | remote SDO upload/download | `PKG_LELY_USING_MASTER_SDO` |
 | manual remote reconfiguration | `PKG_LELY_USING_MASTER_NMT_CFG` |
 | local manufacturer OD access | `PKG_LELY_USING_LOCAL_OD` |
+| dynamic local OD upload + write notification | `PKG_LELY_USING_MASTER_OD_HOOKS` |
 | trigger static Master TPDO | `PKG_LELY_USING_MASTER_PDO_TX` |
 | SYNC and synchronous PDO controls | `PKG_LELY_USING_MASTER_SYNC_PDO` |
 | EMCY bridge | `PKG_LELY_USING_MASTER_EMCY` |

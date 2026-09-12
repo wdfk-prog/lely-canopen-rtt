@@ -95,6 +95,12 @@ Node1 默认 PDO 为 event-driven。RPDO1 通过 `0x20000020` 映射 `0x2000:00`
 
 request 通过 owner queue，真正的 `co_dev_t` 访问仍发生在 Lely owner thread。已有 Lely download indication 会被链式保留，因此 Server-SDO 与 RPDO write 不会因为 bridge 而失效；bridge 还会发布最近一次本地 write 的 metadata snapshot，应用无需直接碰 `co_dev_t`。
 
+如果产品需要把 MCU application 的运行时状态直接作为 OD 读值，可额外启用 `PKG_LELY_USING_MASTER_OD_HOOKS`。`lely_rtt_runtime_configure_local_od_upload_ind()` 在 startup 前按 index/sub-index 注册动态 upload hook；Server-SDO、TPDO 和 owner-safe local read 只要走到同一 `co_sub_up_ind()`，都会看到该动态值。注册项在每次 runtime start 时绑定，在 stop 时恢复原 upload indication，并跨 stop/start 保留。
+
+同一选项还提供 `lely_rtt_runtime_configure_local_od_change_ind()`。它在已有 download indication 已接受并提交最终非空写入、且 metadata snapshot 已稳定发布后，在 owner thread 中发送通知。该 notification 不能事后 veto 已提交写入；需要范围/类型/业务写入拒绝时，应继续由 OD/Lely download indication 在 commit 前完成。
+
+两类 callback 都运行在 Lely owner thread，必须 bounded/non-blocking，不能调用会等待 owner completion 的 runtime API。公开 API 不返回 `co_dev_t` 或 `co_sub_t`。
+
 这个 API 不是 generic remote OD API。remote object 仍通过 Client-SDO 访问。
 
 ## 6. 静态 mapping 与 runtime reconfiguration 的边界
