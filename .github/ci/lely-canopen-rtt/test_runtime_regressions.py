@@ -124,9 +124,11 @@ class RuntimeRegressionTests(unittest.TestCase):
             #define CO_NMT_ST_START 0x05u
             #define CO_NMT_ST_PREOP 0x7fu
             #define CO_NMT_ST_TOGGLE 0x80u
+            #define RT_EOK 0
             #define RT_TRUE 1
             #define RT_FALSE 0
             #define RT_NULL NULL
+            #define LELY_RTT_LOG_W(...) ((void)0)
             #define LELY_RTT_REMOTE_STATE_LAST_SHIFT 8u
             #define LELY_RTT_REMOTE_STATE_TIMEOUT 0x00010000u
             #define LELY_RTT_REMOTE_STATE_CURRENT_MASK 0x000000ffu
@@ -187,6 +189,25 @@ class RuntimeRegressionTests(unittest.TestCase):
             {
                 (void)runtime;
                 (void)node_id;
+            }
+
+            static void lely_rtt_master_cfg_on_local_nmt_state(
+                    struct lely_rtt_runtime *runtime, rt_uint8_t state)
+            {
+                (void)runtime;
+                (void)state;
+            }
+
+            static int lely_rtt_master_emcy_bind(struct lely_rtt_runtime *runtime)
+            {
+                (void)runtime;
+                return RT_EOK;
+            }
+
+            static int lely_rtt_master_time_bind(struct lely_rtt_runtime *runtime)
+            {
+                (void)runtime;
+                return RT_EOK;
             }
 
             static void co_csdo_destroy(co_csdo_t *sdo)
@@ -388,6 +409,12 @@ class RuntimeRegressionTests(unittest.TestCase):
                 (void)data;
             }
 
+            static rt_err_t lely_rtt_master_cfg_bind(struct lely_rtt_runtime *runtime)
+            {
+                (void)runtime;
+                return RT_EOK;
+            }
+
             static rt_err_t lely_rtt_master_sync_bind(struct lely_rtt_runtime *runtime)
             {
                 bind_calls++;
@@ -416,13 +443,39 @@ class RuntimeRegressionTests(unittest.TestCase):
                 return 1;
             }
 
-            static void *co_nmt_get_sync(const co_nmt_t *nmt)
+            static rt_err_t lely_rtt_master_sdo_validate_channels(
+                    struct lely_rtt_runtime *runtime)
+            {
+                (void)runtime;
+                return RT_EOK;
+            }
+
+            static rt_err_t lely_rtt_master_sync_validate(
+                    struct lely_rtt_runtime *runtime)
             {
                 get_sync_calls++;
                 get_sync_step = ++step;
                 if (!reset_calls)
                     order_violation = 1;
-                return nmt->sync_service;
+                return runtime->master_nmt->sync_service ? RT_EOK : -RT_ERROR;
+            }
+
+            static rt_err_t lely_rtt_local_od_bind(struct lely_rtt_runtime *runtime)
+            {
+                (void)runtime;
+                return RT_EOK;
+            }
+
+            static rt_err_t lely_rtt_master_emcy_bind(struct lely_rtt_runtime *runtime)
+            {
+                (void)runtime;
+                return RT_EOK;
+            }
+
+            static rt_err_t lely_rtt_master_time_bind(struct lely_rtt_runtime *runtime)
+            {
+                (void)runtime;
+                return RT_EOK;
             }
 
             static rt_uint8_t co_nmt_get_id(const co_nmt_t *nmt)
@@ -535,11 +588,11 @@ class RuntimeRegressionTests(unittest.TestCase):
             #define LELY_RTT_EVENT_EXIT (1u << 6)
             #define LELY_RTT_EVENT_OWNER_MASK (LELY_RTT_EVENT_STOP | LELY_RTT_EVENT_RX_READY \
                     | LELY_RTT_EVENT_CAN_STATUS | LELY_RTT_EVENT_TIMER_DUE | LELY_RTT_EVENT_COMMAND)
-            #define LELY_RTT_COMMAND_SAFETY_POLL_MS 100u
             #define LELY_RTT_LOG_E(...) ((void)0)
             #define LELY_RTT_LOG_I(...) ((void)0)
 
             typedef int rt_err_t;
+            typedef int rt_bool_t;
             typedef int32_t rt_int32_t;
             typedef uint32_t rt_uint32_t;
             struct rt_event { int unused; };
@@ -576,9 +629,13 @@ class RuntimeRegressionTests(unittest.TestCase):
                 trace_log[trace_len] = '\0';
             }
 
-            static rt_int32_t lely_rtt_timeout_ticks(unsigned int milliseconds)
+            static int lely_rtt_master_command_owner_enabled(void)
             {
-                (void)milliseconds;
+                return RT_TRUE;
+            }
+
+            static rt_int32_t lely_rtt_master_command_owner_wait_timeout(void)
+            {
                 return 1;
             }
 
@@ -693,6 +750,16 @@ class RuntimeRegressionTests(unittest.TestCase):
                 trace('C');
                 if (!set_time_seen)
                     command_used_stale_time = 1;
+            }
+
+            static void lely_rtt_master_cfg_reap(struct lely_rtt_runtime *runtime)
+            {
+                (void)runtime;
+            }
+
+            static void lely_rtt_master_sdo_reap(struct lely_rtt_runtime *runtime)
+            {
+                (void)runtime;
             }
             """
         )

@@ -14,6 +14,9 @@
  * 2026-09-06     wdfk-prog         add managed manual CFG source state
  * 2026-09-07     wdfk-prog         synchronize passive and CAN network clocks
  * 2026-09-08     wdfk-prog         add SYNC and synchronous PDO owner state
+ * 2026-09-11     wdfk-prog         add custom Client-SDO routing and pending FIFO
+ * 2026-09-11     wdfk-prog         add disabled-feature runtime boundary stubs
+ * 2026-09-12     wdfk-prog         pin runtime while SDO cancellation drains
  */
 
 /**
@@ -356,10 +359,14 @@ struct lely_rtt_runtime {
 #endif /* defined(PKG_LELY_USING_MASTER_TIME) */
 
 #if defined(PKG_LELY_USING_MASTER_SDO)
-    /** Lazily created application Client-SDO selected per remote Node-ID. */
+    /** Startup-selected 0=predefined or 1..128 local 0x1280 Client-SDO number. */
+    rt_uint8_t sdo_channel[CO_NUM_NODES + 1];
+    /** Lazily created application-owned predefined Client-SDO per remote node. */
     co_csdo_t *sdo_clients[CO_NUM_NODES + 1];
-    /** At most one application SDO request can own each Client-SDO. */
+    /** At most one application SDO request can own each node's selected channel. */
     lely_rtt_sdo_request_t *sdo_active[CO_NUM_NODES + 1];
+    /** Owner-only head of the bounded FIFO waiting behind sdo_active. */
+    lely_rtt_sdo_request_t *sdo_pending[CO_NUM_NODES + 1];
     /** Owner-only gate blocking application SDO during NMT stop/reset/boot. */
     rt_bool_t sdo_suspended[CO_NUM_NODES + 1];
     /** Owner-only marker keeping reset suspension until boot completion/state. */
@@ -368,6 +375,8 @@ struct lely_rtt_runtime {
     rt_bool_t sdo_stop_pending[CO_NUM_NODES + 1];
     /** Opaque per-runtime request identifier sequence for SDO posts. */
     rt_atomic_t sdo_next_request_id;
+    /** Runtime pins held after owner completion while cancel() still drains. */
+    rt_atomic_t sdo_cancel_refs;
 #endif /* defined(PKG_LELY_USING_MASTER_SDO) */
 
     rt_err_t init_result;      /**< Owner initialization result published by READY. */
@@ -383,7 +392,21 @@ struct lely_rtt_runtime {
     rt_bool_t running;                    /**< Owner work loop is active. */
 };
 
+/*
+ * runtime.c invokes optional lifecycle hooks through these feature boundaries
+ * instead of scattering package conditionals through the owner orchestration.
+ * Disabled branches are compile-time no-ops; feature-only request types remain
+ * hidden inside their enabled branches below.
+ */
 #if defined(PKG_LELY_USING_MASTER_COMMAND)
+/** @brief Report whether owner command scheduling is active in this build. */
+static inline rt_bool_t
+lely_rtt_master_command_owner_enabled(void)
+{
+    return RT_TRUE;
+}
+/** @brief Return the bounded owner wait used as the lost-wakeup safety poll. */
+rt_int32_t lely_rtt_master_command_owner_wait_timeout(void);
 /** @brief Reset command admission to the closed state before owner startup. */
 void lely_rtt_master_command_prepare(struct lely_rtt_runtime *runtime);
 /** @brief Open command admission only for a ready Master and uncanceled run. */
@@ -411,6 +434,61 @@ void lely_rtt_master_sync_complete(struct lely_rtt_master_sync *sync,
 rt_err_t lely_rtt_master_sync_wait(struct lely_rtt_master_sync *sync);
 /** @brief Detach a completed/unposted synchronous request event safely. */
 void lely_rtt_master_sync_fini(struct lely_rtt_master_sync *sync);
+#else
+static inline rt_bool_t
+lely_rtt_master_command_owner_enabled(void)
+{
+    return RT_FALSE;
+}
+
+static inline rt_int32_t
+lely_rtt_master_command_owner_wait_timeout(void)
+{
+    return RT_WAITING_FOREVER;
+}
+
+static inline void
+lely_rtt_master_command_prepare(struct lely_rtt_runtime *runtime)
+{
+    (void)runtime;
+}
+
+static inline void
+lely_rtt_master_command_admission_open(struct lely_rtt_runtime *runtime)
+{
+    (void)runtime;
+}
+
+static inline void
+lely_rtt_master_command_quiesce_begin(struct lely_rtt_runtime *runtime)
+{
+    (void)runtime;
+}
+
+static inline void
+lely_rtt_master_command_wait_idle(struct lely_rtt_runtime *runtime)
+{
+    (void)runtime;
+}
+
+static inline rt_err_t
+lely_rtt_master_command_init(struct lely_rtt_runtime *runtime)
+{
+    (void)runtime;
+    return RT_EOK;
+}
+
+static inline void
+lely_rtt_master_command_fini(struct lely_rtt_runtime *runtime)
+{
+    (void)runtime;
+}
+
+static inline void
+lely_rtt_master_command_dispatch(struct lely_rtt_runtime *runtime)
+{
+    (void)runtime;
+}
 #endif /* defined(PKG_LELY_USING_MASTER_COMMAND) */
 
 #if defined(PKG_LELY_USING_MASTER_NMT_CFG)
@@ -446,6 +524,45 @@ void lely_rtt_master_cfg_on_nmt_command(struct lely_rtt_runtime *runtime,
  */
 void lely_rtt_master_cfg_on_local_nmt_state(
         struct lely_rtt_runtime *runtime, rt_uint8_t state);
+#else
+static inline rt_err_t
+lely_rtt_master_cfg_bind(struct lely_rtt_runtime *runtime)
+{
+    (void)runtime;
+    return RT_EOK;
+}
+
+static inline void
+lely_rtt_master_cfg_sources_fini(struct lely_rtt_runtime *runtime)
+{
+    (void)runtime;
+}
+
+static inline void
+lely_rtt_master_cfg_reap(struct lely_rtt_runtime *runtime)
+{
+    (void)runtime;
+}
+
+static inline void
+lely_rtt_master_cfg_prepare_nmt_destroy(struct lely_rtt_runtime *runtime)
+{
+    (void)runtime;
+}
+
+static inline void
+lely_rtt_master_cfg_after_nmt_destroy(struct lely_rtt_runtime *runtime)
+{
+    (void)runtime;
+}
+
+static inline void
+lely_rtt_master_cfg_on_local_nmt_state(struct lely_rtt_runtime *runtime,
+        rt_uint8_t state)
+{
+    (void)runtime;
+    (void)state;
+}
 #endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
 
 #if defined(PKG_LELY_USING_LOCAL_OD)
@@ -460,6 +577,25 @@ void lely_rtt_local_od_dispatch(struct lely_rtt_runtime *runtime,
         struct lely_rtt_local_od_request *request);
 /** @brief Complete a local OD request that never reached the owner. */
 void lely_rtt_local_od_cancel_queued(struct lely_rtt_local_od_request *request);
+#else
+static inline void
+lely_rtt_local_od_reset(struct lely_rtt_runtime *runtime)
+{
+    (void)runtime;
+}
+
+static inline rt_err_t
+lely_rtt_local_od_bind(struct lely_rtt_runtime *runtime)
+{
+    (void)runtime;
+    return RT_EOK;
+}
+
+static inline void
+lely_rtt_local_od_unbind(struct lely_rtt_runtime *runtime)
+{
+    (void)runtime;
+}
 #endif /* defined(PKG_LELY_USING_LOCAL_OD) */
 
 #if defined(PKG_LELY_USING_MASTER_PDO_TX)
@@ -484,6 +620,34 @@ void lely_rtt_master_sync_dispatch(struct lely_rtt_runtime *runtime,
 /** @brief Complete a SYNC control request that never reached the owner. */
 void lely_rtt_master_sync_cancel_queued(
         struct lely_rtt_master_sync_control_request *request);
+/** @brief Validate that the post-reset Lely SYNC service exists. */
+rt_err_t lely_rtt_master_sync_validate(struct lely_rtt_runtime *runtime);
+#else
+static inline void
+lely_rtt_master_sync_reset(struct lely_rtt_runtime *runtime)
+{
+    (void)runtime;
+}
+
+static inline rt_err_t
+lely_rtt_master_sync_bind(struct lely_rtt_runtime *runtime)
+{
+    (void)runtime;
+    return RT_EOK;
+}
+
+static inline void
+lely_rtt_master_sync_unbind(struct lely_rtt_runtime *runtime)
+{
+    (void)runtime;
+}
+
+static inline rt_err_t
+lely_rtt_master_sync_validate(struct lely_rtt_runtime *runtime)
+{
+    (void)runtime;
+    return RT_EOK;
+}
 #endif /* defined(PKG_LELY_USING_MASTER_SYNC_PDO) */
 
 #if defined(PKG_LELY_USING_MASTER_EMCY)
@@ -499,6 +663,25 @@ void lely_rtt_master_emcy_dispatch(struct lely_rtt_runtime *runtime,
 /** @brief Complete an EMCY request that never reached the owner. */
 void lely_rtt_master_emcy_cancel_queued(
         struct lely_rtt_master_emcy_request *request);
+#else
+static inline void
+lely_rtt_master_emcy_reset(struct lely_rtt_runtime *runtime)
+{
+    (void)runtime;
+}
+
+static inline rt_err_t
+lely_rtt_master_emcy_bind(struct lely_rtt_runtime *runtime)
+{
+    (void)runtime;
+    return RT_EOK;
+}
+
+static inline void
+lely_rtt_master_emcy_unbind(struct lely_rtt_runtime *runtime)
+{
+    (void)runtime;
+}
 #endif /* defined(PKG_LELY_USING_MASTER_EMCY) */
 
 #if defined(PKG_LELY_USING_MASTER_TIME)
@@ -514,9 +697,30 @@ void lely_rtt_master_time_dispatch(struct lely_rtt_runtime *runtime,
 /** @brief Complete a TIME request that never reached the owner. */
 void lely_rtt_master_time_cancel_queued(
         struct lely_rtt_master_time_request *request);
+#else
+static inline void
+lely_rtt_master_time_reset(struct lely_rtt_runtime *runtime)
+{
+    (void)runtime;
+}
+
+static inline rt_err_t
+lely_rtt_master_time_bind(struct lely_rtt_runtime *runtime)
+{
+    (void)runtime;
+    return RT_EOK;
+}
+
+static inline void
+lely_rtt_master_time_unbind(struct lely_rtt_runtime *runtime)
+{
+    (void)runtime;
+}
 #endif /* defined(PKG_LELY_USING_MASTER_TIME) */
 
 #if defined(PKG_LELY_USING_MASTER_SDO)
+/** @brief Validate startup-selected custom Client-SDO channels after NMT reset. */
+rt_err_t lely_rtt_master_sdo_validate_channels(struct lely_rtt_runtime *runtime);
 /** @brief Dispatch one queued SDO request in the owner thread. */
 void lely_rtt_master_sdo_dispatch(struct lely_rtt_runtime *runtime,
         lely_rtt_sdo_request_t *request);
@@ -527,9 +731,11 @@ void lely_rtt_master_sdo_cancel_dispatch(struct lely_rtt_runtime *runtime,
 void lely_rtt_master_sdo_reap(struct lely_rtt_runtime *runtime);
 /** @brief Complete an SDO request that never reached the owner dispatcher. */
 void lely_rtt_master_sdo_cancel_queued(lely_rtt_sdo_request_t *request);
-/** @brief Cancel active application SDO work for one node or all nodes (id 0). */
+/** @brief Cancel active and per-node pending SDO work for one node or all nodes. */
 void lely_rtt_master_sdo_cancel_node(struct lely_rtt_runtime *runtime,
         rt_uint8_t node_id);
+/** @brief Wait until staged SDO cancellation runtime pins are released. */
+void lely_rtt_master_sdo_cancel_wait_idle(struct lely_rtt_runtime *runtime);
 /** @brief Retire one application CSDO before Lely starts remote NMT boot. */
 void lely_rtt_master_sdo_before_boot(struct lely_rtt_runtime *runtime,
         rt_uint8_t node_id);
@@ -542,8 +748,47 @@ void lely_rtt_master_sdo_on_nmt_command(struct lely_rtt_runtime *runtime,
 /** @brief Finalize the application-SDO reset/boot gate after NMT boot completes. */
 void lely_rtt_master_sdo_on_boot_complete(struct lely_rtt_runtime *runtime,
         rt_uint8_t node_id, rt_uint8_t state);
-/** @brief Cancel and destroy all lazily created application Client-SDOs. */
+/** @brief Cancel all SDO work and destroy application-owned predefined clients. */
 void lely_rtt_master_sdo_fini(struct lely_rtt_runtime *runtime);
+#else
+static inline rt_err_t
+lely_rtt_master_sdo_validate_channels(struct lely_rtt_runtime *runtime)
+{
+    (void)runtime;
+    return RT_EOK;
+}
+
+static inline void
+lely_rtt_master_sdo_reap(struct lely_rtt_runtime *runtime)
+{
+    (void)runtime;
+}
+
+static inline void
+lely_rtt_master_sdo_before_boot(struct lely_rtt_runtime *runtime,
+        rt_uint8_t node_id)
+{
+    (void)runtime;
+    (void)node_id;
+}
+
+static inline void
+lely_rtt_master_sdo_on_nmt_state(struct lely_rtt_runtime *runtime,
+        rt_uint8_t node_id, rt_uint8_t state)
+{
+    (void)runtime;
+    (void)node_id;
+    (void)state;
+}
+
+static inline void
+lely_rtt_master_sdo_on_boot_complete(struct lely_rtt_runtime *runtime,
+        rt_uint8_t node_id, rt_uint8_t state)
+{
+    (void)runtime;
+    (void)node_id;
+    (void)state;
+}
 #endif /* defined(PKG_LELY_USING_MASTER_SDO) */
 
 /**

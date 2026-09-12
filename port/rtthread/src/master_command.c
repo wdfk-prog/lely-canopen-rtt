@@ -9,6 +9,7 @@
  * 2026-09-06     wdfk-prog         dispatch TPDO and EMCY owner-safe requests
  * 2026-09-06     wdfk-prog         add owner-dispatched application SDO cancellation
  * 2026-09-08     wdfk-prog         dispatch SYNC/PDO control requests
+ * 2026-09-11     wdfk-prog         own runtime command polling policy
  */
 
 /**
@@ -24,6 +25,20 @@
 #include "internal.h"
 
 #if defined(PKG_LELY_USING_MASTER_COMMAND)
+
+/**
+ * @brief Low-rate fallback that bounds a lost Master-command wakeup.
+ *
+ * The disabled feature boundary returns RT_WAITING_FOREVER instead, preserving
+ * the original event-driven wait policy when command ingress is not built.
+ */
+#define LELY_RTT_COMMAND_SAFETY_POLL_MS 1000u
+
+rt_int32_t
+lely_rtt_master_command_owner_wait_timeout(void)
+{
+    return lely_rtt_timeout_ticks(LELY_RTT_COMMAND_SAFETY_POLL_MS);
+}
 
 /** @brief Try to pin the command queue while command admission is open. */
 static rt_bool_t

@@ -45,15 +45,17 @@ create request
 
 Important contracts:
 
-- one application SDO transaction may be active per remote Node-ID;
-- the runtime lazily creates an application-owned Client-SDO using the CiA 301 predefined connection;
-- it does not borrow the NMT boot Client-SDO;
-- custom `0x1280` Client-SDO communication parameters are not selected by this implementation;
+- one application SDO transaction is active per remote Node-ID, with up to `PKG_LELY_MASTER_SDO_QUEUE_DEPTH` additional requests waiting in a per-node FIFO;
+- different remote Node-IDs may have application SDO transactions active in parallel;
+- the default path lazily creates an application-owned Client-SDO using the CiA 301 predefined connection and does not borrow the NMT boot Client-SDO;
+- `lely_rtt_runtime_configure_sdo_channel()` may select a startup-only custom Client-SDO number `1..128`, corresponding to local Master objects `0x1280..0x12FF`; `0` keeps the predefined path;
+- a selected custom Client-SDO is borrowed from the Lely NMT service manager and is never stopped or destroyed by the application bridge;
+- custom communication parameters are validated after local NMT reset and again immediately before a queued request becomes active, so a runtime parameter drift fails locally instead of starting on a stale/overlapping channel;
 - download payloads are copied before a successful post returns;
 - upload result data remains owned by the request until request destruction succeeds;
 - protocol timeout, SDO abort code, local error, cancellation, and shutdown cancellation remain distinct terminal outcomes.
 
-Reset/stop transitions and remote Boot-up arbitrate ownership of the predefined SDO channel so application SDO does not race NMT boot/configuration.
+Reset/stop transitions, remote Boot-up, and manual NMT configuration cancel or block the application SDO boundary for that node. This applies to both predefined and selected custom channels so application requests cannot interleave with NMT boot/configuration ownership.
 
 ## 4. Manual NMT configuration
 
@@ -140,4 +142,4 @@ Only commands backed by enabled Kconfig features are printed/accepted. Scalar MS
 
 ## 10. What the control plane does not provide
 
-The current API deliberately does not expose raw Lely ownership, custom Client-SDO connection selection, general dynamic PDO remapping, or an automatic wall-clock synchronization policy. Those would change product/runtime contracts and should be designed explicitly rather than inferred from existing helper APIs.
+The current API deliberately does not expose raw Lely Client-SDO ownership, runtime mutation of custom `0x1280..0x12FF` communication parameters, general dynamic PDO remapping, or an automatic wall-clock synchronization policy. Custom CSDO selection is limited to the startup-only numbered-channel selector described above; direct use of the same raw Lely CSDO while application requests are active remains outside the contract.

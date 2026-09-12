@@ -6,560 +6,27 @@
  * 2026-09-05     wdfk-prog         first version
  * 2026-09-05     wdfk-prog         arbitrate application SDO with manual NMT configuration
  * 2026-09-06     wdfk-prog         add block transfer and race-safe application cancellation
+ * 2026-09-11     wdfk-prog         add custom CSDO routing and per-node request FIFO
+ * 2026-09-11     wdfk-prog         reschedule pending SDO after failed cancel enqueue
+ * 2026-09-11     wdfk-prog         split request and Client-SDO transport helpers
+ * 2026-09-12     wdfk-prog         drain cancel pins before SDO teardown
  */
 
 /**
  * @file master_sdo.c
- * @brief Owner-thread Client-SDO transactions for remote CANopen nodes.
+ * @brief Owner-thread scheduling and lifecycle coordination for Master Client-SDO.
  *
- * The owner lazily creates one application-owned CiA 301 default Client-SDO
- * per remote Node-ID. At most one application transaction is active per node.
- * Lely NMT boot creates its own default CSDO, so the application CSDO is
- * retired before Boot-up is chained into the NMT boot state machine.
+ * This translation unit owns per-node FIFO scheduling, dispatch/reap, NMT
+ * transition arbitration and teardown. Request lifetime/public APIs live in
+ * master_sdo_request.c; channel selection and transfer startup live in
+ * master_sdo_client.c.
  *
  * @author wdfk-prog
  */
 
-#include "internal.h"
+#include "master_sdo_internal.h"
 
 #if defined(PKG_LELY_USING_MASTER_SDO)
-
-#include <lely/co/csdo.h>
-
-#include <limits.h>
-
-/** @brief Completion event bit private to one SDO request object. */
-#define LELY_RTT_SDO_EVENT_DONE (1u << 0)
-
-enum lely_rtt_sdo_request_state {
-    LELY_RTT_SDO_REQUEST_NEW = 0,
-    LELY_RTT_SDO_REQUEST_QUEUED,
-    LELY_RTT_SDO_REQUEST_CANCEL_PENDING,
-    LELY_RTT_SDO_REQUEST_TEARDOWN_PENDING,
-    LELY_RTT_SDO_REQUEST_ACTIVE,
-    LELY_RTT_SDO_REQUEST_ACTIVE_CANCEL_PINNED,
-    LELY_RTT_SDO_REQUEST_ACTIVE_CANCEL_DONE,
-    LELY_RTT_SDO_REQUEST_DONE,
-};
-
-struct lely_rtt_sdo_request {
-    struct rt_event completion;
-    rt_atomic_t state;
-    rt_atomic_t completion_refs;
-
-    lely_rtt_runtime_t *runtime;
-    rt_uint32_t request_id;
-    enum lely_rtt_sdo_operation operation;
-    rt_uint8_t node_id;
-    rt_uint16_t index;
-    rt_uint8_t subindex;
-    rt_uint32_t timeout_ms;
-    rt_bool_t block_transfer;
-    rt_uint8_t block_pst;
-
-    void *buffer;
-    rt_size_t size;
-
-    enum lely_rtt_sdo_completion_status completion_status;
-    rt_err_t local_error;
-    rt_uint32_t abort_code;
-    rt_bool_t cancel_requested;
-};
-
-/** @brief Publish one terminal request result and wake waiters exactly once. */
-static void
-lely_rtt_master_sdo_complete(lely_rtt_sdo_request_t *request,
-        enum lely_rtt_sdo_completion_status status, rt_err_t local_error,
-        rt_uint32_t abort_code)
-{
-    rt_atomic_t state;
-    rt_uint32_t request_id;
-
-    if (!request)
-        return;
-
-    state = rt_atomic_load(&request->state);
-    if (state == LELY_RTT_SDO_REQUEST_DONE
-            || state == LELY_RTT_SDO_REQUEST_ACTIVE_CANCEL_DONE)
-        return;
-
-    request->completion_status = status;
-    request->local_error = local_error;
-    request->abort_code = abort_code;
-    request_id = request->request_id;
-
-    for (;;) {
-        rt_atomic_t expected;
-
-        if (state == LELY_RTT_SDO_REQUEST_DONE
-                || state == LELY_RTT_SDO_REQUEST_ACTIVE_CANCEL_DONE)
-            return;
-
-        if (state == LELY_RTT_SDO_REQUEST_ACTIVE_CANCEL_PINNED) {
-            /*
-             * The cancel caller still owns a temporary lifetime pin while it
-             * copies identity into the owner command. Stage the terminal
-             * result, but let that caller publish DONE after releasing its pin.
-             */
-            expected = LELY_RTT_SDO_REQUEST_ACTIVE_CANCEL_PINNED;
-            if (rt_atomic_compare_exchange_strong(&request->state, &expected,
-                    LELY_RTT_SDO_REQUEST_ACTIVE_CANCEL_DONE))
-                return;
-            state = expected;
-            continue;
-        }
-
-        /*
-         * Claim DONE atomically against an active cancel trying to pin the
-         * request. completion_refs protects the event until send() returns.
-         */
-        rt_atomic_store(&request->completion_refs, 1);
-        expected = state;
-        if (rt_atomic_compare_exchange_strong(&request->state, &expected,
-                LELY_RTT_SDO_REQUEST_DONE)) {
-            if (rt_event_send(&request->completion, LELY_RTT_SDO_EVENT_DONE)
-                    != RT_EOK) {
-                LELY_RTT_LOG_E("SDO request completion event send failed: id=%u",
-                        (unsigned int)request_id);
-            }
-            rt_atomic_store(&request->completion_refs, 0);
-            return;
-        }
-        rt_atomic_store(&request->completion_refs, 0);
-        state = expected;
-    }
-}
-
-/** @brief Release an active-cancel lifetime pin and publish staged completion. */
-static void
-lely_rtt_sdo_request_cancel_unpin(lely_rtt_sdo_request_t *request)
-{
-    rt_atomic_t expected = LELY_RTT_SDO_REQUEST_ACTIVE_CANCEL_PINNED;
-
-    if (rt_atomic_compare_exchange_strong(&request->state, &expected,
-            LELY_RTT_SDO_REQUEST_ACTIVE))
-        return;
-
-    if (expected == LELY_RTT_SDO_REQUEST_ACTIVE_CANCEL_DONE) {
-        const rt_uint32_t request_id = request->request_id;
-
-        /*
-         * A completion raced the cancel command admission and staged its
-         * result. Keep the request alive through the final wake-up, then never
-         * dereference it again because the awakened owner may destroy it.
-         */
-        rt_atomic_store(&request->completion_refs, 1);
-        expected = LELY_RTT_SDO_REQUEST_ACTIVE_CANCEL_DONE;
-        if (rt_atomic_compare_exchange_strong(&request->state, &expected,
-                LELY_RTT_SDO_REQUEST_DONE)) {
-            if (rt_event_send(&request->completion, LELY_RTT_SDO_EVENT_DONE)
-                    != RT_EOK) {
-                LELY_RTT_LOG_E("SDO request completion event send failed: id=%u",
-                        (unsigned int)request_id);
-            }
-        }
-        rt_atomic_store(&request->completion_refs, 0);
-    }
-}
-
-/** @brief Complete a remote SDO callback with protocol abort or success. */
-static void
-lely_rtt_master_sdo_finish_protocol(struct lely_rtt_runtime *runtime,
-        lely_rtt_sdo_request_t *request, rt_uint32_t abort_code)
-{
-    if (!runtime || !request)
-        return;
-
-    if (request->node_id <= CO_NUM_NODES
-            && runtime->sdo_active[request->node_id] == request) {
-        runtime->sdo_active[request->node_id] = RT_NULL;
-        runtime->sdo_stop_pending[request->node_id] = RT_TRUE;
-    }
-
-    if (request->cancel_requested) {
-        lely_rtt_master_sdo_complete(request, LELY_RTT_SDO_COMPLETION_CANCELED,
-                RT_EOK, abort_code);
-    } else if (abort_code) {
-        lely_rtt_master_sdo_complete(request, LELY_RTT_SDO_COMPLETION_ABORT,
-                RT_EOK, abort_code);
-    } else {
-        lely_rtt_master_sdo_complete(request, LELY_RTT_SDO_COMPLETION_OK,
-                RT_EOK, 0);
-    }
-}
-
-/** @brief Client-SDO download confirmation executed by the owner thread. */
-static void
-lely_rtt_master_sdo_dn_con(co_csdo_t *sdo, co_unsigned16_t idx,
-        co_unsigned8_t subidx, co_unsigned32_t ac, void *data)
-{
-    lely_rtt_sdo_request_t *request = data;
-
-    (void)sdo;
-    (void)idx;
-    (void)subidx;
-    if (!request || !request->runtime)
-        return;
-
-    lely_rtt_master_sdo_finish_protocol(request->runtime, request, ac);
-}
-
-/** @brief Client-SDO upload confirmation executed by the owner thread. */
-static void
-lely_rtt_master_sdo_up_con(co_csdo_t *sdo, co_unsigned16_t idx,
-        co_unsigned8_t subidx, co_unsigned32_t ac, const void *ptr,
-        size_t n, void *data)
-{
-    lely_rtt_sdo_request_t *request = data;
-    void *copy = RT_NULL;
-
-    (void)sdo;
-    (void)idx;
-    (void)subidx;
-    if (!request || !request->runtime)
-        return;
-
-    if (!ac && n) {
-        copy = rt_malloc(n);
-        if (!copy) {
-            if (request->node_id <= CO_NUM_NODES
-                    && request->runtime->sdo_active[request->node_id] == request) {
-                request->runtime->sdo_active[request->node_id] = RT_NULL;
-                request->runtime->sdo_stop_pending[request->node_id] = RT_TRUE;
-            }
-            lely_rtt_master_sdo_complete(request,
-                    LELY_RTT_SDO_COMPLETION_LOCAL_ERROR, -RT_ENOMEM, 0);
-            return;
-        }
-        rt_memcpy(copy, ptr, n);
-    }
-
-    if (!ac) {
-        request->buffer = copy;
-        request->size = n;
-    }
-    lely_rtt_master_sdo_finish_protocol(request->runtime, request, ac);
-}
-
-/**
- * @brief Resolve the application-owned Client-SDO for one remote node.
- *
- * The first implementation intentionally uses the CiA 301 predefined SDO
- * connection derived from Node-ID. It does not borrow the NMT boot Client-SDO,
- * so application timeouts and callbacks cannot mutate NMT boot configuration.
- */
-static co_csdo_t *
-lely_rtt_master_sdo_get_client(struct lely_rtt_runtime *runtime,
-        rt_uint8_t node_id)
-{
-    co_csdo_t *sdo;
-
-    if (!runtime || !runtime->can_net || !runtime->master_nmt
-            || !node_id || node_id > CO_NUM_NODES)
-        return RT_NULL;
-
-    sdo = runtime->sdo_clients[node_id];
-    if (sdo)
-        return sdo;
-
-    sdo = co_csdo_create(io_can_net_get_net(runtime->can_net), RT_NULL,
-            node_id);
-    if (!sdo) {
-        LELY_RTT_LOG_E("Client-SDO creation failed: node=%u",
-                (unsigned int)node_id);
-        return RT_NULL;
-    }
-
-    runtime->sdo_clients[node_id] = sdo;
-    return sdo;
-}
-
-lely_rtt_sdo_request_t *
-lely_rtt_sdo_request_create(void)
-{
-    lely_rtt_sdo_request_t *request = rt_calloc(1, sizeof(*request));
-
-    if (!request)
-        return RT_NULL;
-    if (rt_event_init(&request->completion, "lelysdo", RT_IPC_FLAG_FIFO)
-            != RT_EOK) {
-        rt_free(request);
-        return RT_NULL;
-    }
-
-    rt_atomic_store(&request->state, LELY_RTT_SDO_REQUEST_NEW);
-    rt_atomic_store(&request->completion_refs, 0);
-    return request;
-}
-
-rt_err_t
-lely_rtt_sdo_request_destroy(lely_rtt_sdo_request_t *request)
-{
-    const rt_atomic_t state = request
-            ? rt_atomic_load(&request->state) : LELY_RTT_SDO_REQUEST_NEW;
-
-    if (!request)
-        return RT_EOK;
-    if (state == LELY_RTT_SDO_REQUEST_QUEUED
-            || state == LELY_RTT_SDO_REQUEST_CANCEL_PENDING
-            || state == LELY_RTT_SDO_REQUEST_TEARDOWN_PENDING
-            || state == LELY_RTT_SDO_REQUEST_ACTIVE
-            || state == LELY_RTT_SDO_REQUEST_ACTIVE_CANCEL_PINNED
-            || state == LELY_RTT_SDO_REQUEST_ACTIVE_CANCEL_DONE)
-        return -RT_EBUSY;
-
-    /*
-     * A waiter can preempt the owner from inside rt_event_send(). Do not detach
-     * the embedded event until the completion publisher has returned from it.
-     */
-    while (rt_atomic_load(&request->completion_refs) != 0)
-        rt_thread_mdelay(1);
-
-    rt_event_detach(&request->completion);
-    rt_free(request->buffer);
-    request->buffer = RT_NULL;
-    rt_free(request);
-    return RT_EOK;
-}
-
-rt_err_t
-lely_rtt_sdo_request_get_id(const lely_rtt_sdo_request_t *request,
-        rt_uint32_t *request_id)
-{
-    if (!request || !request_id
-            || rt_atomic_load((rt_atomic_t *)&request->state)
-                    == LELY_RTT_SDO_REQUEST_NEW)
-        return -RT_EINVAL;
-
-    *request_id = request->request_id;
-    return RT_EOK;
-}
-
-rt_err_t
-lely_rtt_sdo_request_wait(lely_rtt_sdo_request_t *request,
-        rt_int32_t timeout_ms)
-{
-    rt_uint32_t events = 0;
-    rt_int32_t ticks;
-
-    if (!request)
-        return -RT_EINVAL;
-    if (rt_atomic_load(&request->state) == LELY_RTT_SDO_REQUEST_NEW)
-        return -RT_EINVAL;
-    if (rt_atomic_load(&request->state) == LELY_RTT_SDO_REQUEST_DONE)
-        return RT_EOK;
-
-    if (timeout_ms == RT_WAITING_FOREVER) {
-        ticks = RT_WAITING_FOREVER;
-    } else if (timeout_ms < 0) {
-        return -RT_EINVAL;
-    } else if (!timeout_ms) {
-        ticks = RT_WAITING_NO;
-    } else {
-        ticks = lely_rtt_timeout_ticks((rt_uint32_t)timeout_ms);
-    }
-
-    {
-        rt_err_t err = rt_event_recv(&request->completion,
-                LELY_RTT_SDO_EVENT_DONE, RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR,
-                ticks, &events);
-
-        if (err != RT_EOK)
-            return err;
-        return rt_atomic_load(&request->state) == LELY_RTT_SDO_REQUEST_DONE
-                ? RT_EOK : -RT_ERROR;
-    }
-}
-
-rt_err_t
-lely_rtt_sdo_request_get_result(const lely_rtt_sdo_request_t *request,
-        struct lely_rtt_sdo_result *result)
-{
-    if (!request || !result)
-        return -RT_EINVAL;
-    if (rt_atomic_load((rt_atomic_t *)&request->state)
-            != LELY_RTT_SDO_REQUEST_DONE)
-        return -RT_EBUSY;
-
-    result->request_id = request->request_id;
-    result->operation = request->operation;
-    result->node_id = request->node_id;
-    result->index = request->index;
-    result->subindex = request->subindex;
-    result->status = request->completion_status;
-    result->local_error = request->local_error;
-    result->abort_code = request->abort_code;
-    result->data = request->buffer;
-    result->size = request->size;
-    return RT_EOK;
-}
-
-/** @brief Common preflight and queue submission for one SDO request. */
-static rt_err_t
-lely_rtt_runtime_post_sdo(lely_rtt_runtime_t *runtime,
-        lely_rtt_sdo_request_t *request, enum lely_rtt_sdo_operation operation,
-        rt_uint8_t node_id, rt_uint16_t index, rt_uint8_t subindex,
-        const void *data, rt_size_t size, rt_uint32_t timeout_ms,
-        rt_bool_t block_transfer, rt_uint8_t block_pst)
-{
-    struct lely_rtt_master_command command;
-    void *copy = RT_NULL;
-    rt_err_t err;
-
-    if (!runtime || !request || !node_id || node_id > CO_NUM_NODES
-            || !timeout_ms || timeout_ms > INT_MAX)
-        return -RT_EINVAL;
-    if ((rt_uint8_t)rt_atomic_load(&runtime->local_node_id) == node_id)
-        return -RT_EINVAL;
-    if (rt_atomic_load(&request->state) != LELY_RTT_SDO_REQUEST_NEW)
-        return -RT_EBUSY;
-    if (operation == LELY_RTT_SDO_DOWNLOAD && (!data || !size))
-        return -RT_EINVAL;
-
-    if (operation == LELY_RTT_SDO_DOWNLOAD) {
-        copy = rt_malloc(size);
-        if (!copy)
-            return -RT_ENOMEM;
-        rt_memcpy(copy, data, size);
-    }
-
-    request->runtime = runtime;
-    request->request_id = (rt_uint32_t)rt_atomic_add(
-            &runtime->sdo_next_request_id, 1) + 1u;
-    request->operation = operation;
-    request->node_id = node_id;
-    request->index = index;
-    request->subindex = subindex;
-    request->timeout_ms = timeout_ms;
-    request->block_transfer = block_transfer;
-    request->block_pst = block_pst;
-    request->buffer = copy;
-    request->size = operation == LELY_RTT_SDO_DOWNLOAD ? size : 0;
-    request->completion_status = LELY_RTT_SDO_COMPLETION_LOCAL_ERROR;
-    request->local_error = RT_EOK;
-    request->abort_code = 0;
-    request->cancel_requested = RT_FALSE;
-    rt_atomic_store(&request->state, LELY_RTT_SDO_REQUEST_QUEUED);
-
-    rt_memset(&command, 0, sizeof(command));
-    command.type = LELY_RTT_MASTER_COMMAND_SDO;
-    command.data.sdo.request = request;
-    err = lely_rtt_master_command_post(runtime, &command);
-    if (err != RT_EOK) {
-        rt_atomic_store(&request->state, LELY_RTT_SDO_REQUEST_NEW);
-        request->runtime = RT_NULL;
-        request->buffer = RT_NULL;
-        request->size = 0;
-        rt_free(copy);
-    }
-
-    return err;
-}
-
-rt_err_t
-lely_rtt_runtime_post_sdo_upload(lely_rtt_runtime_t *runtime,
-        lely_rtt_sdo_request_t *request, rt_uint8_t node_id,
-        rt_uint16_t index, rt_uint8_t subindex, rt_uint32_t timeout_ms)
-{
-    return lely_rtt_runtime_post_sdo(runtime, request, LELY_RTT_SDO_UPLOAD,
-            node_id, index, subindex, RT_NULL, 0, timeout_ms, RT_FALSE, 0);
-}
-
-rt_err_t
-lely_rtt_runtime_post_sdo_download(lely_rtt_runtime_t *runtime,
-        lely_rtt_sdo_request_t *request, rt_uint8_t node_id,
-        rt_uint16_t index, rt_uint8_t subindex, const void *data,
-        rt_size_t size, rt_uint32_t timeout_ms)
-{
-    return lely_rtt_runtime_post_sdo(runtime, request, LELY_RTT_SDO_DOWNLOAD,
-            node_id, index, subindex, data, size, timeout_ms, RT_FALSE, 0);
-}
-
-rt_err_t
-lely_rtt_runtime_post_sdo_block_upload(lely_rtt_runtime_t *runtime,
-        lely_rtt_sdo_request_t *request, rt_uint8_t node_id,
-        rt_uint16_t index, rt_uint8_t subindex, rt_uint8_t pst,
-        rt_uint32_t timeout_ms)
-{
-    return lely_rtt_runtime_post_sdo(runtime, request, LELY_RTT_SDO_UPLOAD,
-            node_id, index, subindex, RT_NULL, 0, timeout_ms, RT_TRUE, pst);
-}
-
-rt_err_t
-lely_rtt_runtime_post_sdo_block_download(lely_rtt_runtime_t *runtime,
-        lely_rtt_sdo_request_t *request, rt_uint8_t node_id,
-        rt_uint16_t index, rt_uint8_t subindex, const void *data,
-        rt_size_t size, rt_uint32_t timeout_ms)
-{
-    return lely_rtt_runtime_post_sdo(runtime, request, LELY_RTT_SDO_DOWNLOAD,
-            node_id, index, subindex, data, size, timeout_ms, RT_TRUE, 0);
-}
-
-rt_err_t
-lely_rtt_sdo_request_cancel(lely_rtt_sdo_request_t *request)
-{
-    struct lely_rtt_master_command command;
-    lely_rtt_runtime_t *runtime;
-    rt_uint32_t request_id;
-    rt_uint8_t node_id;
-    rt_err_t err;
-    rt_atomic_t state;
-
-    if (!request)
-        return -RT_EINVAL;
-
-    state = rt_atomic_load(&request->state);
-    for (;;) {
-        rt_atomic_t expected;
-
-        if (state == LELY_RTT_SDO_REQUEST_NEW)
-            return -RT_EINVAL;
-        if (state == LELY_RTT_SDO_REQUEST_DONE)
-            return -RT_EBUSY;
-        if (state == LELY_RTT_SDO_REQUEST_CANCEL_PENDING)
-            return RT_EOK;
-
-        if (state == LELY_RTT_SDO_REQUEST_ACTIVE) {
-            /*
-             * Pin ACTIVE before reading request identity. If owner dispatch
-             * changes QUEUED to ACTIVE while cancellation is racing it, a
-             * failed queued CAS feeds that ACTIVE state back into this loop.
-             */
-            expected = LELY_RTT_SDO_REQUEST_ACTIVE;
-            if (!rt_atomic_compare_exchange_strong(&request->state, &expected,
-                    LELY_RTT_SDO_REQUEST_ACTIVE_CANCEL_PINNED)) {
-                state = expected;
-                continue;
-            }
-
-            runtime = request->runtime;
-            node_id = request->node_id;
-            request_id = request->request_id;
-
-            rt_memset(&command, 0, sizeof(command));
-            command.type = LELY_RTT_MASTER_COMMAND_SDO_CANCEL;
-            command.data.sdo_cancel.node_id = node_id;
-            command.data.sdo_cancel.request_id = request_id;
-            err = lely_rtt_master_command_post(runtime, &command);
-            lely_rtt_sdo_request_cancel_unpin(request);
-            return err;
-        }
-
-        if (state != LELY_RTT_SDO_REQUEST_QUEUED)
-            return -RT_EBUSY;
-
-        /*
-         * This CAS is the queued-cancel linearization point. If it wins, the
-         * original SDO command remains responsible for terminal publication,
-         * so request storage stays alive while that command still holds it.
-         */
-        expected = LELY_RTT_SDO_REQUEST_QUEUED;
-        if (rt_atomic_compare_exchange_strong(&request->state, &expected,
-                LELY_RTT_SDO_REQUEST_CANCEL_PENDING))
-            return RT_EOK;
-        state = expected;
-    }
-}
 
 /**
  * @brief Apply one owner-only SDO suspension state to one node or all nodes.
@@ -713,109 +180,138 @@ lely_rtt_master_sdo_on_boot_complete(struct lely_rtt_runtime *runtime,
     lely_rtt_master_sdo_set_suspended(runtime, node_id, suspended, RT_FALSE);
 }
 
+/** @brief Claim a request from the global command queue or finish a queued cancel. */
+static rt_bool_t
+lely_rtt_master_sdo_claim(lely_rtt_sdo_request_t *request,
+        rt_atomic_t desired_state)
+{
+    rt_atomic_t expected = LELY_RTT_SDO_REQUEST_QUEUED;
+
+    if (rt_atomic_compare_exchange_strong(&request->state, &expected,
+            desired_state))
+        return RT_TRUE;
+
+    if (expected == LELY_RTT_SDO_REQUEST_CANCEL_PENDING) {
+        request->cancel_requested = RT_TRUE;
+        lely_rtt_master_sdo_complete(request,
+                LELY_RTT_SDO_COMPLETION_CANCELED, RT_EOK,
+                CO_SDO_AC_NO_SDO);
+    }
+    return RT_FALSE;
+}
+
+/** @brief Return whether owner policy currently permits a new SDO for a node. */
+static rt_bool_t
+lely_rtt_master_sdo_node_available(struct lely_rtt_runtime *runtime,
+        rt_uint8_t node_id)
+{
+    if (!runtime || !runtime->master_nmt || !runtime->can_net
+            || !node_id || node_id > CO_NUM_NODES
+            || runtime->sdo_suspended[node_id])
+        return RT_FALSE;
+
+#if !LELY_NO_CO_NMT_BOOT
+    if (co_nmt_is_booting(runtime->master_nmt, node_id))
+        return RT_FALSE;
+#endif /* !LELY_NO_CO_NMT_BOOT */
+
+#if defined(PKG_LELY_USING_MASTER_NMT_CFG)
+    if (lely_rtt_master_cfg_node_busy(runtime, node_id))
+        return RT_FALSE;
+#endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
+
+    return RT_TRUE;
+}
+
+/** @brief Append one owner-claimed request to the bounded per-node FIFO. */
+static rt_bool_t
+lely_rtt_master_sdo_pending_append(struct lely_rtt_runtime *runtime,
+        lely_rtt_sdo_request_t *request)
+{
+    lely_rtt_sdo_request_t *cursor;
+    lely_rtt_sdo_request_t *tail = RT_NULL;
+    rt_uint16_t count = 0;
+
+    cursor = runtime->sdo_pending[request->node_id];
+    while (cursor) {
+        if (++count >= PKG_LELY_MASTER_SDO_QUEUE_DEPTH)
+            return RT_FALSE;
+        tail = cursor;
+        cursor = cursor->next;
+    }
+
+    if (!lely_rtt_master_sdo_claim(request, LELY_RTT_SDO_REQUEST_PENDING))
+        return RT_TRUE;
+
+    request->next = RT_NULL;
+    if (tail)
+        tail->next = request;
+    else
+        runtime->sdo_pending[request->node_id] = request;
+    return RT_TRUE;
+}
+
 void
 lely_rtt_master_sdo_dispatch(struct lely_rtt_runtime *runtime,
         lely_rtt_sdo_request_t *request)
 {
-    co_csdo_t *sdo;
-    int result;
+    const rt_uint8_t node_id = request ? request->node_id : 0;
 
-    rt_atomic_t expected = LELY_RTT_SDO_REQUEST_QUEUED;
-
-    if (!runtime || !request)
+    if (!runtime || !request || !node_id || node_id > CO_NUM_NODES)
         return;
 
+    if (!lely_rtt_master_sdo_node_available(runtime, node_id)) {
+        if (lely_rtt_master_sdo_claim(request, LELY_RTT_SDO_REQUEST_ACTIVE))
+            lely_rtt_master_sdo_complete(request,
+                    LELY_RTT_SDO_COMPLETION_LOCAL_ERROR, -RT_EBUSY, 0);
+        return;
+    }
+
     /*
-     * Claim ACTIVE before any Lely transfer API can run. A queued cancel that
-     * won the same CAS race must complete here without issuing remote traffic.
+     * Never let a newly dispatched command bypass an older per-node request.
+     * Only the owner mutates the linked FIFO; non-owner cancellation changes
+     * request state and asks the owner to unlink by stable request identity.
      */
-    if (!rt_atomic_compare_exchange_strong(&request->state, &expected,
-            LELY_RTT_SDO_REQUEST_ACTIVE)) {
-        if (expected == LELY_RTT_SDO_REQUEST_CANCEL_PENDING) {
+    if (runtime->sdo_active[node_id] || runtime->sdo_pending[node_id]) {
+        if (!lely_rtt_master_sdo_pending_append(runtime, request)) {
+            if (lely_rtt_master_sdo_claim(request,
+                    LELY_RTT_SDO_REQUEST_ACTIVE)) {
+                lely_rtt_master_sdo_complete(request,
+                        LELY_RTT_SDO_COMPLETION_LOCAL_ERROR, -RT_EBUSY, 0);
+            }
+        }
+        return;
+    }
+
+    if (!lely_rtt_master_sdo_claim(request, LELY_RTT_SDO_REQUEST_ACTIVE))
+        return;
+    lely_rtt_master_sdo_start_active(runtime, request);
+}
+
+/** @brief Remove and cancel one pending request by stable identity. */
+static rt_bool_t
+lely_rtt_master_sdo_cancel_pending(struct lely_rtt_runtime *runtime,
+        rt_uint8_t node_id, rt_uint32_t request_id)
+{
+    lely_rtt_sdo_request_t **link = &runtime->sdo_pending[node_id];
+
+    while (*link) {
+        lely_rtt_sdo_request_t *request = *link;
+
+        if (request->request_id == request_id) {
+            lely_rtt_sdo_request_t *next = request->next;
+
+            *link = next;
+            request->next = RT_NULL;
             request->cancel_requested = RT_TRUE;
             lely_rtt_master_sdo_complete(request,
                     LELY_RTT_SDO_COMPLETION_CANCELED, RT_EOK,
                     CO_SDO_AC_NO_SDO);
+            return RT_TRUE;
         }
-        return;
+        link = &request->next;
     }
-    if (!runtime->master_nmt || !runtime->can_net) {
-        lely_rtt_master_sdo_complete(request,
-                LELY_RTT_SDO_COMPLETION_LOCAL_ERROR, -RT_EBUSY, 0);
-        return;
-    }
-    if (runtime->sdo_suspended[request->node_id]) {
-        lely_rtt_master_sdo_complete(request,
-                LELY_RTT_SDO_COMPLETION_LOCAL_ERROR, -RT_EBUSY, 0);
-        return;
-    }
-
-#if !LELY_NO_CO_NMT_BOOT
-    if (co_nmt_is_booting(runtime->master_nmt, request->node_id)) {
-        lely_rtt_master_sdo_complete(request,
-                LELY_RTT_SDO_COMPLETION_LOCAL_ERROR, -RT_EBUSY, 0);
-        return;
-    }
-#endif /* !LELY_NO_CO_NMT_BOOT */
-
-#if defined(PKG_LELY_USING_MASTER_NMT_CFG)
-    if (lely_rtt_master_cfg_node_busy(runtime, request->node_id)) {
-        lely_rtt_master_sdo_complete(request,
-                LELY_RTT_SDO_COMPLETION_LOCAL_ERROR, -RT_EBUSY, 0);
-        return;
-    }
-#endif /* defined(PKG_LELY_USING_MASTER_NMT_CFG) */
-
-    if (runtime->sdo_active[request->node_id]) {
-        lely_rtt_master_sdo_complete(request,
-                LELY_RTT_SDO_COMPLETION_LOCAL_ERROR, -RT_EBUSY, 0);
-        return;
-    }
-
-    sdo = lely_rtt_master_sdo_get_client(runtime, request->node_id);
-    if (!sdo) {
-        lely_rtt_master_sdo_complete(request,
-                LELY_RTT_SDO_COMPLETION_LOCAL_ERROR, -RT_ERROR, 0);
-        return;
-    }
-    if (co_csdo_is_stopped(sdo) && co_csdo_start(sdo) == -1) {
-        lely_rtt_master_sdo_complete(request,
-                LELY_RTT_SDO_COMPLETION_LOCAL_ERROR, -RT_ERROR, 0);
-        return;
-    }
-    if (!co_csdo_is_idle(sdo)) {
-        lely_rtt_master_sdo_complete(request,
-                LELY_RTT_SDO_COMPLETION_LOCAL_ERROR, -RT_EBUSY, 0);
-        return;
-    }
-
-    co_csdo_set_timeout(sdo, (int)request->timeout_ms);
-    runtime->sdo_active[request->node_id] = request;
-
-    if (request->operation == LELY_RTT_SDO_UPLOAD) {
-        if (request->block_transfer) {
-            result = co_csdo_blk_up_req(sdo, request->index, request->subindex,
-                    request->block_pst, &lely_rtt_master_sdo_up_con, request);
-        } else {
-            result = co_csdo_up_req(sdo, request->index, request->subindex,
-                    &lely_rtt_master_sdo_up_con, request);
-        }
-    } else if (request->block_transfer) {
-        result = co_csdo_blk_dn_req(sdo, request->index, request->subindex,
-                request->buffer, request->size, &lely_rtt_master_sdo_dn_con,
-                request);
-    } else {
-        result = co_csdo_dn_req(sdo, request->index, request->subindex,
-                request->buffer, request->size, &lely_rtt_master_sdo_dn_con,
-                request);
-    }
-
-    if (result == -1 && runtime->sdo_active[request->node_id] == request) {
-        runtime->sdo_active[request->node_id] = RT_NULL;
-        runtime->sdo_stop_pending[request->node_id] = RT_TRUE;
-        lely_rtt_master_sdo_complete(request,
-                LELY_RTT_SDO_COMPLETION_LOCAL_ERROR, -RT_ERROR, 0);
-    }
+    return RT_FALSE;
 }
 
 void
@@ -829,23 +325,26 @@ lely_rtt_master_sdo_cancel_dispatch(struct lely_rtt_runtime *runtime,
         return;
 
     request = runtime->sdo_active[node_id];
-    if (!request || request->request_id != request_id)
+    if (!request || request->request_id != request_id) {
+        (void)lely_rtt_master_sdo_cancel_pending(runtime, node_id, request_id);
         return;
+    }
 
-    sdo = runtime->sdo_clients[node_id];
+    sdo = lely_rtt_master_sdo_get_client(runtime, node_id, RT_FALSE);
     request->cancel_requested = RT_TRUE;
 
     /*
      * Frozen Lely co_csdo_abort_req() invokes the transfer confirmation before
-     * returning. The confirmation clears sdo_active and marks stop_pending, so
-     * request must not be dereferenced after this call if it woke its owner.
+     * returning. The confirmation may wake the request owner, so do not
+     * dereference request after abort_req() if sdo_active no longer owns it.
      */
     if (sdo && !co_csdo_is_idle(sdo) && !co_csdo_is_stopped(sdo))
         co_csdo_abort_req(sdo, CO_SDO_AC_NO_SDO);
 
     if (runtime->sdo_active[node_id] == request) {
         runtime->sdo_active[node_id] = RT_NULL;
-        runtime->sdo_stop_pending[node_id] = RT_TRUE;
+        if (lely_rtt_master_sdo_uses_predefined(runtime, node_id))
+            runtime->sdo_stop_pending[node_id] = RT_TRUE;
         lely_rtt_master_sdo_complete(request, LELY_RTT_SDO_COMPLETION_CANCELED,
                 RT_EOK, CO_SDO_AC_NO_SDO);
     }
@@ -872,8 +371,8 @@ lely_rtt_master_sdo_cancel_queued(lely_rtt_sdo_request_t *request)
             return;
 
         /*
-         * This CAS linearizes plain teardown against explicit cancel.
-         * The winner fixes the terminal abort-code contract before DONE.
+         * This CAS linearizes plain command-queue teardown against explicit
+         * cancel. Per-node pending requests are canceled by sdo_fini() instead.
          */
         expected = LELY_RTT_SDO_REQUEST_QUEUED;
         if (rt_atomic_compare_exchange_strong(&request->state, &expected,
@@ -902,15 +401,16 @@ lely_rtt_master_sdo_cancel_node(struct lely_rtt_runtime *runtime,
 
     for (id = first; id <= last; id++) {
         lely_rtt_sdo_request_t *request = runtime->sdo_active[id];
-        co_csdo_t *sdo = runtime->sdo_clients[id];
+        co_csdo_t *sdo = lely_rtt_master_sdo_get_client(runtime,
+                (rt_uint8_t)id, RT_FALSE);
+        lely_rtt_sdo_request_t *pending;
 
         if (request) {
             request->cancel_requested = RT_TRUE;
             /*
-             * In the frozen Lely CSDO implementation abort_req() runs the
-             * abort state transition and confirmation callback synchronously.
-             * That callback may wake the request owner, so after this call only
-             * compare the saved pointer value; do not dereference request.
+             * abort_req() confirms synchronously in the frozen Lely revision.
+             * Save all state needed below before the call; an awakened request
+             * owner may destroy request as soon as the confirmation is sent.
              */
             if (sdo && !co_csdo_is_idle(sdo) && !co_csdo_is_stopped(sdo))
                 co_csdo_abort_req(sdo, CO_SDO_AC_NO_SDO);
@@ -923,10 +423,75 @@ lely_rtt_master_sdo_cancel_node(struct lely_rtt_runtime *runtime,
             }
         }
 
-        if (sdo && !co_csdo_is_stopped(sdo))
-            co_csdo_stop(sdo);
+        /*
+         * Detach the complete FIFO before publishing any completion. This makes
+         * the owner list independent of request lifetime once a waiter wakes.
+         */
+        pending = runtime->sdo_pending[id];
+        runtime->sdo_pending[id] = RT_NULL;
+        while (pending) {
+            lely_rtt_sdo_request_t *next = pending->next;
+
+            pending->next = RT_NULL;
+            pending->cancel_requested = RT_TRUE;
+            lely_rtt_master_sdo_complete(pending,
+                    LELY_RTT_SDO_COMPLETION_CANCELED, RT_EOK,
+                    CO_SDO_AC_NO_SDO);
+            pending = next;
+        }
+
+        if (lely_rtt_master_sdo_uses_predefined(runtime, (rt_uint8_t)id)) {
+            sdo = runtime->sdo_clients[id];
+            if (sdo && !co_csdo_is_stopped(sdo))
+                co_csdo_stop(sdo);
+        }
         runtime->sdo_stop_pending[id] = RT_FALSE;
     }
+}
+
+/**
+ * @brief Promote the FIFO head without allowing a successful pending cancel to race it.
+ * @return RT_TRUE only when the detached head finished synchronously and the
+ *         owner may immediately try the next FIFO entry; otherwise RT_FALSE.
+ */
+static rt_bool_t
+lely_rtt_master_sdo_start_pending(struct lely_rtt_runtime *runtime,
+        rt_uint8_t node_id)
+{
+    lely_rtt_sdo_request_t *request;
+    rt_atomic_t expected;
+
+    if (!lely_rtt_master_sdo_node_available(runtime, node_id)
+            || runtime->sdo_active[node_id])
+        return RT_FALSE;
+
+    request = runtime->sdo_pending[node_id];
+    if (!request)
+        return RT_FALSE;
+
+    if (rt_atomic_load(&request->state) == LELY_RTT_SDO_REQUEST_CANCEL_PENDING) {
+        lely_rtt_sdo_request_t *next = request->next;
+
+        runtime->sdo_pending[node_id] = next;
+        request->next = RT_NULL;
+        request->cancel_requested = RT_TRUE;
+        lely_rtt_master_sdo_complete(request,
+                LELY_RTT_SDO_COMPLETION_CANCELED, RT_EOK,
+                CO_SDO_AC_NO_SDO);
+        return RT_FALSE;
+    }
+
+    expected = LELY_RTT_SDO_REQUEST_PENDING;
+    if (!rt_atomic_compare_exchange_strong(&request->state, &expected,
+            LELY_RTT_SDO_REQUEST_ACTIVE)) {
+        /* A cancel caller may still hold the lifetime pin; retry next owner pass. */
+        return RT_FALSE;
+    }
+
+    runtime->sdo_pending[node_id] = request->next;
+    request->next = RT_NULL;
+    lely_rtt_master_sdo_start_active(runtime, request);
+    return runtime->sdo_active[node_id] == RT_NULL;
 }
 
 void
@@ -938,20 +503,35 @@ lely_rtt_master_sdo_reap(struct lely_rtt_runtime *runtime)
         return;
 
     for (id = 1; id <= CO_NUM_NODES; id++) {
-        co_csdo_t *sdo;
+        for (;;) {
+            co_csdo_t *sdo;
 
-        if (!runtime->sdo_stop_pending[id] || runtime->sdo_active[id])
-            continue;
+            if (runtime->sdo_active[id])
+                break;
 
-        sdo = runtime->sdo_clients[id];
-        if (!sdo) {
-            runtime->sdo_stop_pending[id] = RT_FALSE;
-            continue;
+            if (runtime->sdo_stop_pending[id]) {
+                sdo = runtime->sdo_clients[id];
+                if (!sdo) {
+                    runtime->sdo_stop_pending[id] = RT_FALSE;
+                } else {
+                    if (!co_csdo_is_stopped(sdo) && co_csdo_is_idle(sdo))
+                        co_csdo_stop(sdo);
+                    if (co_csdo_is_stopped(sdo))
+                        runtime->sdo_stop_pending[id] = RT_FALSE;
+                }
+            }
+
+            if (runtime->sdo_stop_pending[id]
+                    || !lely_rtt_master_sdo_start_pending(runtime,
+                            (rt_uint8_t)id))
+                break;
+
+            /*
+             * A promoted head can finish before start_active() returns. Retry
+             * only for that outcome so its successor does not depend on a new
+             * owner wake; every retry consumes one bounded FIFO entry.
+             */
         }
-        if (!co_csdo_is_stopped(sdo) && co_csdo_is_idle(sdo))
-            co_csdo_stop(sdo);
-        if (co_csdo_is_stopped(sdo))
-            runtime->sdo_stop_pending[id] = RT_FALSE;
     }
 }
 
@@ -964,14 +544,21 @@ lely_rtt_master_sdo_fini(struct lely_rtt_runtime *runtime)
         return;
 
     lely_rtt_master_sdo_cancel_node(runtime, 0);
+    /*
+     * cancel_node() can detach work still pinned by an external canceler.
+     * Drain those runtime pins before clients and runtime state are torn down.
+     */
+    lely_rtt_master_sdo_cancel_wait_idle(runtime);
     for (id = 1; id <= CO_NUM_NODES; id++) {
         if (runtime->sdo_clients[id])
             co_csdo_destroy(runtime->sdo_clients[id]);
         runtime->sdo_clients[id] = RT_NULL;
         runtime->sdo_active[id] = RT_NULL;
+        runtime->sdo_pending[id] = RT_NULL;
         runtime->sdo_suspended[id] = RT_FALSE;
         runtime->sdo_reset_pending[id] = RT_FALSE;
         runtime->sdo_stop_pending[id] = RT_FALSE;
+        /* sdo_channel[] is startup configuration and persists across restart. */
     }
 }
 

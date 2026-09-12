@@ -52,3 +52,92 @@ jobs:
           name: host-tests-log
           path: host-tests.log
           if-no-files-found: error
+
+  prepare-stm32f4-combination:
+    name: Prepare STM32F4 combination base
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+    outputs:
+      profiles: ${{ steps.matrix.outputs.profiles }}
+
+    steps:
+      - name: Checkout package
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up RT-Thread build environment
+        uses: ./.github/actions/setup-rtthread-build
+
+      - name: Validate combination profile specification
+        run: python .github/ci/lely-canopen-rtt/build_matrix.py --validate
+
+      - name: Export native Matrix profiles
+        id: matrix
+        run: |
+          set -euo pipefail
+          profiles="$(python .github/ci/lely-canopen-rtt/build_matrix.py --list-profiles-json)"
+          echo "profiles=$profiles" >> "$GITHUB_OUTPUT"
+          echo "GitHub Matrix profiles: $profiles"
+
+      - name: Prepare shared STM32F4 base
+        run: >-
+          python .github/ci/lely-canopen-rtt/build_matrix.py
+          --work-dir _ci-prepare
+          --prepare
+
+      - name: Upload shared STM32F4 base and Prepare evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: stm32f4-combination-prepare
+          path: |
+            _ci-prepare/rt-thread-base.tar
+            _ci-prepare/source-revisions.json
+            _ci-prepare/prepare-summary.json
+            _ci-prepare/logs/*.log
+          if-no-files-found: error
+
+  stm32f4-combination-build:
+    name: STM32F4 combination / ${{ matrix.profile }}
+    needs: prepare-stm32f4-combination
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        profile: ${{ fromJSON(needs.prepare-stm32f4-combination.outputs.profiles) }}
+
+    steps:
+      - name: Checkout package
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up RT-Thread build environment
+        uses: ./.github/actions/setup-rtthread-build
+
+      - name: Download shared STM32F4 base
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: stm32f4-combination-prepare
+          path: _ci-shared
+
+      - name: Build STM32F4 combination profile
+        env:
+          PROFILE: ${{ matrix.profile }}
+        run: |
+          set -euo pipefail
+          python .github/ci/lely-canopen-rtt/build_matrix.py \
+            --work-dir "_ci-$PROFILE" \
+            --base-archive _ci-shared/rt-thread-base.tar \
+            --run-profile "$PROFILE"
+
+      - name: Upload STM32F4 profile evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: stm32f4-combination-${{ matrix.profile }}-evidence
+          path: |
+            _ci-${{ matrix.profile }}/logs/*.log
+            _ci-${{ matrix.profile }}/profile-summary.json
+            _ci-shared/source-revisions.json
+            _ci-shared/prepare-summary.json
+          if-no-files-found: error

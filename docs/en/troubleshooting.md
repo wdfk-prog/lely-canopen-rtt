@@ -88,7 +88,7 @@ Distinguish:
 - explicit application cancellation;
 - shutdown/reset cancellation.
 
-Only one application transaction may be active per remote node. NMT boot/configuration and reset transitions can temporarily own or block the predefined SDO connection.
+Only one application transaction is active per remote node, but up to `PKG_LELY_MASTER_SDO_QUEUE_DEPTH` additional requests may wait in that node's FIFO. A successful post only proves admission to the global owner queue; if the per-node FIFO is full when the owner dispatches it, the request completes with `LOCAL_ERROR` and `-RT_EBUSY`. NMT boot/configuration and reset transitions can temporarily own or block the node-level application SDO boundary, including a selected custom CSDO.
 
 ## 10. Manual configuration does nothing during automatic boot
 

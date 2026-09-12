@@ -101,7 +101,7 @@ The public owner-safe API is declared in `port/rtthread/include/lely/rtthread/ru
 
 - local and remote NMT snapshots plus boot-result snapshots;
 - asynchronous NMT commands;
-- request-object based SDO upload/download and block transfer;
+- request-object based SDO upload/download and block transfer, with optional custom CSDO selection and a bounded per-node FIFO;
 - explicit manual NMT configuration using concise DCF data;
 - local manufacturer OD access in `0x2000..0x5FFF`;
 - static TPDO event triggering and local PDO transmission-type control;

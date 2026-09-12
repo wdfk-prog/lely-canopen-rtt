@@ -88,7 +88,7 @@ SDO post 成功只代表 queue admission 成功。最终以 request terminal res
 - explicit application cancel；
 - shutdown/reset cancel。
 
-每个 remote node 同时最多一个 application transaction；NMT boot/configuration 与 reset transition 可能临时占用或阻塞 predefined SDO connection。
+每个 remote node 同时最多一个 active application transaction，但可以有最多 `PKG_LELY_MASTER_SDO_QUEUE_DEPTH` 个 request 在该节点 FIFO 中等待。post 成功只证明进入全局 owner queue；如果 owner dispatch 时 per-node FIFO 已满，该 request 会以 `LOCAL_ERROR` 和 `-RT_EBUSY` 结束。NMT boot/configuration 与 reset transition 可能临时占用或阻塞整个节点级 application SDO 边界，包括已选择的 custom CSDO。
 
 ## 10. Automatic boot 期间 application DCF 没有生效
 

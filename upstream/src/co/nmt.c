@@ -1377,12 +1377,14 @@ co_nmt_on_lg(co_nmt_t *nmt, int state)
 	if (state == CO_NMT_EC_OCCURRED) {
 		co_nmt_on_err(nmt, 0x8130, 0x10, NULL);
 	} else if (state == CO_NMT_EC_RESOLVED) {
+#if !LELY_NO_CO_EMCY
 		if (nmt->srv.emcy) {
 			// Remove the EMCY message from the stack.
 			ssize_t n = co_emcy_find(nmt->srv.emcy, 0x8130);
 			if (n >= 0)
 				co_emcy_remove(nmt->srv.emcy, n);
 		}
+#endif
 	}
 }
 
@@ -1432,12 +1434,14 @@ co_nmt_on_hb(co_nmt_t *nmt, co_unsigned8_t id, int state, int reason)
 		if (co_nmt_is_master(nmt))
 			return;
 #endif
+#if !LELY_NO_CO_EMCY
 		if (nmt->srv.emcy) {
 			// Remove the EMCY message from the stack.
 			ssize_t n = co_emcy_find(nmt->srv.emcy, 0x8130);
 			if (n >= 0)
 				co_emcy_remove(nmt->srv.emcy, n);
 		}
+#endif
 	}
 }
 
