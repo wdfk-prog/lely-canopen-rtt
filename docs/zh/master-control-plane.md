@@ -45,15 +45,17 @@ create request
 
 关键契约：
 
-- 每个 remote Node-ID 同时最多一个 application SDO transaction；
-- runtime 按需创建 application-owned、基于 CiA 301 predefined connection 的 Client-SDO；
-- 不借用 NMT boot Client-SDO；
-- 当前实现不选择自定义 `0x1280` Client-SDO communication parameter；
+- 每个 remote Node-ID 同时最多一个 active application SDO transaction，并允许最多 `PKG_LELY_MASTER_SDO_QUEUE_DEPTH` 个 request 在该节点的 FIFO 中等待；
+- 不同 remote Node-ID 的 application SDO transaction 可以并行 active；
+- 默认路径按需创建 application-owned、基于 CiA 301 predefined connection 的 Client-SDO，不借用 NMT boot Client-SDO；
+- `lely_rtt_runtime_configure_sdo_channel()` 可在 startup 前为节点选择 `1..128` 的 custom Client-SDO，对应 local Master `0x1280..0x12FF`；传 `0` 保持 predefined path；
+- custom Client-SDO 从 Lely NMT service manager 借用，application bridge 不会 stop/destroy 它；
+- custom communication parameter 会在 local NMT reset 后验证，并在 queued request 真正变成 active 前再次验证；如果运行期参数漂移，则本地失败而不是使用过期/冲突通道启动传输；
 - download payload 在成功 post 返回前完成复制；
 - upload result data 由 request 持有，直到 request destroy 成功；
 - protocol timeout、SDO abort、local error、application cancel、shutdown cancel 是不同 terminal outcome。
 
-reset/stop 与 remote Boot-up 会参与默认 SDO channel ownership 仲裁，避免 application SDO 和 NMT boot/configuration 抢同一通道。
+reset/stop、remote Boot-up 与 manual NMT configuration 会在整个节点级 application SDO 边界上执行 cancel/block；predefined 与选中的 custom channel 都受此仲裁，避免 application request 与 NMT boot/configuration 交错。
 
 ## 4. Manual NMT configuration
 
@@ -140,4 +142,4 @@ co sdo write <node> <index> <subindex> <type> <value> <timeout-ms>
 
 ## 10. 当前不提供什么
 
-现 API 有意不暴露 raw Lely ownership、自定义 Client-SDO connection selection、通用 dynamic PDO remapping，也没有自动 wall-clock synchronization policy。这些能力会改变产品/runtime 契约，应单独设计，而不是从现有 helper API 推导出来。
+现 API 有意不暴露 raw Lely Client-SDO ownership、运行期修改 custom `0x1280..0x12FF` communication parameter、通用 dynamic PDO remapping，也没有自动 wall-clock synchronization policy。Custom CSDO 只通过上述 startup-only channel selector 选择；application request active 期间直接操作同一个 raw Lely CSDO 仍不在公开契约内。

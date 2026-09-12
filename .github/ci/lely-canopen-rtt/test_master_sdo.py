@@ -64,8 +64,24 @@ class MasterSdoHostHarnessTests(unittest.TestCase):
         self.assertIn("PASS block-abort-and-start-failures", completed.stdout)
         self.assertIn("PASS queued-cancel-and-teardown-arbitration", completed.stdout)
         self.assertIn("PASS active-cancel-and-completion-pin", completed.stdout)
+        self.assertIn("PASS cancel-pin-blocks-sdo-teardown", completed.stdout)
         self.assertIn("PASS stale-cancel-identity-is-ignored", completed.stdout)
-        self.assertIn("Passed 5/5 host SDO cases", completed.stdout)
+        self.assertIn(
+            "PASS custom-channel-validation-and-borrowed-lifecycle", completed.stdout
+        )
+        self.assertIn(
+            "PASS custom-channel-cobid-conflicts-and-runtime-drift", completed.stdout
+        )
+        self.assertIn("PASS per-node-fifo-order-and-capacity", completed.stdout)
+        self.assertIn("PASS pending-custom-busy-continues-fifo", completed.stdout)
+        self.assertIn("PASS pending-request-failure-continues-fifo", completed.stdout)
+        self.assertIn("PASS pending-cancel-and-teardown", completed.stdout)
+        self.assertIn("PASS pending-cancel-race-with-promotion", completed.stdout)
+        self.assertIn(
+            "PASS pending-cancel-post-failure-reschedules-promotion", completed.stdout
+        )
+        self.assertIn("PASS cross-node-requests-remain-parallel", completed.stdout)
+        self.assertIn("Passed 15/15 host SDO cases", completed.stdout)
 
 
 if __name__ == "__main__":

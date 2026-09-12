@@ -5,6 +5,7 @@
  * Date           Author            Notes
  * 2026-09-06     wdfk-prog         first version
  * 2026-09-08     wdfk-prog         split SYNC callback bind from service readiness
+ * 2026-09-11     wdfk-prog         own post-reset SYNC readiness validation
  */
 
 /**
@@ -144,6 +145,19 @@ lely_rtt_master_sync_unbind(struct lely_rtt_runtime *runtime)
     co_nmt_get_sync_ind(runtime->master_nmt, &ind, &data);
     if (ind == &lely_rtt_master_sync_ind && data == runtime)
         co_nmt_set_sync_ind(runtime->master_nmt, RT_NULL, RT_NULL);
+}
+
+rt_err_t
+lely_rtt_master_sync_validate(struct lely_rtt_runtime *runtime)
+{
+    if (!runtime || !runtime->master_nmt)
+        return -RT_EINVAL;
+    if (!co_nmt_get_sync(runtime->master_nmt)) {
+        LELY_RTT_LOG_E("SYNC bridge enabled but SYNC service is unavailable");
+        return -RT_ERROR;
+    }
+
+    return RT_EOK;
 }
 
 /** @brief Update object 0x1006 through the active Lely SYNC service. */

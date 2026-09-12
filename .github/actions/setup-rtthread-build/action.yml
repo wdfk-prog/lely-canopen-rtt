@@ -1,0 +1,111 @@
+name: Set up RT-Thread build
+description: Install the shared RT-Thread CI dependencies and ARM GCC toolchain.
+
+inputs:
+  python-version:
+    description: Python version used by the RT-Thread build helpers.
+    required: false
+    default: '3.10'
+  requirements-path:
+    description: Pinned Python requirements for the RT-Thread CI helpers.
+    required: false
+    default: .github/ci/lely-canopen-rtt/requirements.txt
+  arm-gcc-version:
+    description: ARM GNU Toolchain release used by the STM32F4 compile matrix.
+    required: false
+    default: 10.3-2021.10
+  arm-gcc-archive:
+    description: ARM GNU Toolchain archive name.
+    required: false
+    default: gcc-arm-none-eabi-10.3-2021.10-x86_64-linux.tar.bz2
+  arm-gcc-sha256:
+    description: SHA-256 of the ARM GNU Toolchain archive.
+    required: false
+    default: 97dbb4f019ad1650b732faffcc881689cedc14e2b7ee863d390e0a41ef16c9a3
+  arm-gcc-base-url:
+    description: Base URL for the pinned ARM GNU Toolchain archive.
+    required: false
+    default: https://developer.arm.com/-/media/Files/downloads/gnu-rm/10.3-2021.10
+  arm-gcc-dir:
+    description: Fixed toolchain installation and cache directory.
+    required: false
+    default: /opt/gcc-arm-none-eabi
+
+runs:
+  using: composite
+  steps:
+    - name: Install Host packages
+      shell: bash
+      run: |
+        set -euo pipefail
+        export DEBIAN_FRONTEND=noninteractive
+        sudo apt-get update -qq \
+          -o Acquire::Retries=5 \
+          -o Acquire::http::Timeout=30 \
+          -o Acquire::https::Timeout=30
+        timeout 20m sudo apt-get install -y --no-install-recommends \
+          -o Acquire::Retries=5 \
+          -o Acquire::http::Timeout=30 \
+          -o Acquire::https::Timeout=30 \
+          bzip2 ca-certificates git make rsync tar wget
+
+    - name: Set up Python
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      with:
+        python-version: ${{ inputs.python-version }}
+        cache: pip
+        cache-dependency-path: ${{ inputs.requirements-path }}
+
+    - name: Install RT-Thread build dependencies
+      shell: bash
+      run: |
+        set -euo pipefail
+        python -m pip install --user -r '${{ inputs.requirements-path }}'
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        python - <<'PY'
+        import SCons
+        print("SCons version:", SCons.__version__)
+        assert SCons.__version__ == "4.8.1", SCons.__version__
+        PY
+
+    - name: Prepare ARM GCC directory
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo mkdir -p '${{ inputs.arm-gcc-dir }}'
+        sudo chown -R "$USER:$(id -gn)" '${{ inputs.arm-gcc-dir }}'
+
+    - name: Restore ARM GCC cache
+      id: cache-arm-gcc
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ${{ inputs.arm-gcc-dir }}
+        key: ${{ runner.os }}-arm-gcc-${{ inputs.arm-gcc-version }}-v1
+
+    - name: Install ARM GCC on cache miss
+      if: steps.cache-arm-gcc.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        timeout 25m bash -euo pipefail <<'INSTALL_ARM_GCC'
+        tmp_dir="$(mktemp -d)"
+        trap 'rm -rf "$tmp_dir"' EXIT
+        archive="$tmp_dir/${{ inputs.arm-gcc-archive }}"
+        wget --tries=5 --timeout=30 -O "$archive" \
+          '${{ inputs.arm-gcc-base-url }}/${{ inputs.arm-gcc-archive }}'
+        echo '${{ inputs.arm-gcc-sha256 }}'"  $archive" | sha256sum -c -
+        tar -xjf "$archive" -C "$tmp_dir"
+        extracted_dir="$(find "$tmp_dir" -maxdepth 1 -type d -name 'gcc-arm-none-eabi-*' -print -quit)"
+        test -n "$extracted_dir"
+        rm -rf '${{ inputs.arm-gcc-dir }}'/*
+        cp -a "$extracted_dir"/. '${{ inputs.arm-gcc-dir }}'/
+        test -x '${{ inputs.arm-gcc-dir }}/bin/arm-none-eabi-gcc'
+        INSTALL_ARM_GCC
+
+    - name: Export ARM GCC
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo '${{ inputs.arm-gcc-dir }}/bin' >> "$GITHUB_PATH"
+        echo 'RTT_CC=gcc' >> "$GITHUB_ENV"
+        echo 'RTT_EXEC_PATH=${{ inputs.arm-gcc-dir }}/bin' >> "$GITHUB_ENV"
+        '${{ inputs.arm-gcc-dir }}/bin/arm-none-eabi-gcc' --version

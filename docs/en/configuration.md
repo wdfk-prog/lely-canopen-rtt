@@ -74,6 +74,8 @@ PKG_LELY_USING_MASTER_COMMAND
 
 `PKG_LELY_MASTER_COMMAND_QUEUE_DEPTH` defaults to 8 and bounds copied commands waiting for owner dispatch.
 
+When `PKG_LELY_USING_MASTER_SDO` is enabled, `PKG_LELY_MASTER_SDO_QUEUE_DEPTH` defaults to 4 and limits the additional per-node SDO requests waiting behind the single active request. Its valid range is 1..16. This FIFO is separate from the global Master command queue.
+
 `PKG_LELY_USING_MASTER_EMCY` uses a fixed-size per-runtime history. `PKG_LELY_MASTER_EMCY_HISTORY_DEPTH` defaults to 8 and is limited to 1..32.
 
 ## 5. MSH

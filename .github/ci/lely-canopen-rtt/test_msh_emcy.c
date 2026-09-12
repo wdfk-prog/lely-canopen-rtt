@@ -156,6 +156,9 @@ lely_rtt_runtime_get_emcy(lely_rtt_runtime_t *runtime, rt_uint8_t node_id,
     return RT_EOK;
 }
 
+#include "../../../port/rtthread/src/msh/msh_common.c"
+#include "../../../port/rtthread/src/msh/msh_nmt.c"
+#include "../../../port/rtthread/src/msh/msh_emcy.c"
 #include "../../../port/rtthread/src/msh.c"
 
 #define CHECK(name, condition) \

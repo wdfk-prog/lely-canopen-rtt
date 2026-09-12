@@ -74,6 +74,8 @@ PKG_LELY_USING_MASTER_COMMAND
 
 `PKG_LELY_MASTER_COMMAND_QUEUE_DEPTH` 默认 8，用来限制等待 owner dispatch 的复制 command 数。
 
+启用 `PKG_LELY_USING_MASTER_SDO` 时，`PKG_LELY_MASTER_SDO_QUEUE_DEPTH` 默认 4，用于限制每个节点在单个 active request 之后继续等待的 SDO request 数，合法范围为 1..16。这个 FIFO 与全局 Master command queue 相互独立。
+
 `PKG_LELY_USING_MASTER_EMCY` 使用固定大小的 per-runtime history；`PKG_LELY_MASTER_EMCY_HISTORY_DEPTH` 默认 8，范围 1..32。
 
 ## 5. MSH

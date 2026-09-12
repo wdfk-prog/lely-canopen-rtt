@@ -6,15 +6,10 @@
  * 2026-09-03     wdfk-prog         first version
  * 2026-09-04     wdfk-prog         add CANopen node and command ingress APIs
  * 2026-09-05     wdfk-prog         correct the local role to an NMT master runtime
- * 2026-09-05     wdfk-prog         add Master NMT/SDO command APIs for MSH
- * 2026-09-05     wdfk-prog         add NMT configuration, local OD and TIME APIs
  * 2026-09-06     wdfk-prog         add block Client-SDO and explicit cancellation APIs
- * 2026-09-06     wdfk-prog         clarify CFG restore and TIME lifetime contracts
- * 2026-09-06     wdfk-prog         document snapshot reader scheduling contract
- * 2026-09-06     wdfk-prog         add TPDO and EMCY application APIs
- * 2026-09-06     wdfk-prog         document synchronous API thread-context contract
- * 2026-09-06     wdfk-prog         add manual CFG data and diagnostic APIs
  * 2026-09-08     wdfk-prog         add SYNC and synchronous PDO application APIs
+ * 2026-09-11     wdfk-prog         add custom Client-SDO routing and per-node FIFO
+ * 2026-09-12     wdfk-prog         reject conflicting custom CSDO COB-IDs
  */
 
 /**
@@ -174,6 +169,9 @@ typedef void lely_rtt_sync_ind_t(lely_rtt_runtime_t *runtime,
 #endif /* defined(PKG_LELY_USING_MASTER_SYNC_PDO) */
 
 #if defined(PKG_LELY_USING_MASTER_SDO)
+/** Use an application-owned CiA 301 predefined Client-SDO for this node. */
+#define LELY_RTT_SDO_CHANNEL_PREDEFINED 0u
+
 /**
  * @brief Opaque single-use asynchronous SDO request object.
  *
@@ -358,6 +356,40 @@ lely_rtt_runtime_t *lely_rtt_runtime_create(
  */
 rt_err_t lely_rtt_runtime_configure_master(lely_rtt_runtime_t *runtime,
         const struct co_sdev *master_sdev);
+
+#if defined(PKG_LELY_USING_MASTER_SDO)
+/**
+ * @brief Select the application Client-SDO channel for one remote node.
+ *
+ * This startup-only selector persists across stop/start cycles. Pass
+ * LELY_RTT_SDO_CHANNEL_PREDEFINED to keep the default application-owned CiA
+ * 301 predefined Client-SDO, or pass 1..128 to borrow the corresponding local
+ * Master Client-SDO parameter object 0x1280..0x12FF from the Lely NMT service
+ * manager. The borrowed service remains NMT-owned and is never started,
+ * stopped, or destroyed by the application SDO bridge.
+ *
+ * Custom channel parameters are validated after the local NMT reset during
+ * runtime start and again immediately before a pending request becomes active.
+ * A custom channel must be enabled, target @p node_id, stay outside the
+ * standard predefined request/response COB-ID ranges used by NMT boot, and not
+ * share a request/response CAN identifier with another configured custom
+ * channel.
+ * Application code must not directly operate the same raw Lely Client-SDO or
+ * mutate its 0x1280 communication parameters while application requests can be
+ * active.
+ *
+ * @param runtime Stopped runtime handle with event state initialized.
+ * @param node_id Remote Node-ID in the range 1..127.
+ * @param sdo_number LELY_RTT_SDO_CHANNEL_PREDEFINED, or custom Client-SDO
+ *                   number 1..128 (0x1280 + number - 1).
+ * @return RT_EOK on success or -RT_EINVAL for an invalid runtime/state, Node-ID,
+ *         or Client-SDO number. Custom communication-parameter validation is
+ *         deferred until runtime start because NMT-owned CSDO services do not
+ *         exist before the local NMT reset.
+ */
+rt_err_t lely_rtt_runtime_configure_sdo_channel(lely_rtt_runtime_t *runtime,
+        rt_uint8_t node_id, rt_uint8_t sdo_number);
+#endif /* defined(PKG_LELY_USING_MASTER_SDO) */
 
 #if defined(PKG_LELY_USING_MASTER_SYNC_PDO)
 /**
@@ -926,33 +958,41 @@ rt_err_t lely_rtt_sdo_request_get_result(
 /**
  * @brief Request cancellation of a queued or active application SDO transfer.
  *
- * A queued request is canceled by atomically claiming its pre-dispatch state.
- * If that claim wins, owner dispatch completes the request without starting a
- * remote SDO transfer. An already active request is canceled through the owner
- * queue and may race with remote completion. The terminal result returned by
+ * A request still waiting in the global command queue is canceled by atomically
+ * claiming its pre-dispatch state. A request already retained in the per-node
+ * FIFO is likewise marked cancel-pending before owner dispatch can promote it
+ * to the active transfer. An active request is canceled through the owner queue
+ * and may race with remote completion. The terminal result returned by
  * lely_rtt_sdo_request_get_result() is authoritative. A successful explicit
  * cancel is reported as LELY_RTT_SDO_COMPLETION_CANCELED with the CiA 301
  * connection-unavailable abort code.
  *
  * @param request Posted request object that is still queued or active.
- * @return RT_EOK when queued cancellation is claimed or an active cancel
- *         command is queued, -RT_EBUSY if the request is already terminal
+ * @return RT_EOK when cancellation is claimed or its owner cancel command is
+ *         queued, -RT_EBUSY if the request is already terminal
  *         or teardown has already claimed it, -RT_EINVAL for a fresh/invalid
- *         request, or an RT message-queue admission error for the active path.
+ *         request, or an RT message-queue admission error for a pending/active
+ *         owner-command path.
  */
 rt_err_t lely_rtt_sdo_request_cancel(lely_rtt_sdo_request_t *request);
 
 /**
  * @brief Queue an SDO upload (remote object read).
  *
- * The owner lazily creates an application-owned Client-SDO using the CiA 301
- * predefined connection for node_id. It never borrows the NMT boot CSDO. This
- * first implementation therefore does not select custom 0x1280 Client-SDO
- * communication parameters. One application request is active per remote node,
- * and the application receiver is stopped again after completion so it cannot
- * consume NMT boot/configuration responses while idle. Requests are rejected
- * while NMT boot or a pending stop/reset transition owns the node. timeout_ms
- * must be in the range 1..INT_MAX milliseconds.
+ * Unless a custom channel was selected with
+ * lely_rtt_runtime_configure_sdo_channel(), the owner lazily creates an
+ * application-owned Client-SDO using the CiA 301 predefined connection for
+ * node_id and never borrows the NMT boot CSDO. The predefined receiver is
+ * stopped after the node's application queue becomes idle. A selected custom
+ * 0x1280..0x12FF Client-SDO is borrowed from the local NMT service manager and
+ * retains its Lely-owned lifecycle.
+ *
+ * One request is active per remote node. Up to
+ * PKG_LELY_MASTER_SDO_QUEUE_DEPTH additional requests are serialized in an
+ * owner-only FIFO; different nodes can remain active concurrently. Requests
+ * are rejected/canceled while NMT boot, manual NMT configuration, or a pending
+ * stop/reset transition owns the node. timeout_ms must be in the range
+ * 1..INT_MAX milliseconds.
  *
  * @param runtime Started runtime with a configured local NMT Master.
  * @param request Fresh single-use request object.
@@ -961,8 +1001,10 @@ rt_err_t lely_rtt_sdo_request_cancel(lely_rtt_sdo_request_t *request);
  * @param index Remote object dictionary index.
  * @param subindex Remote object dictionary sub-index.
  * @param timeout_ms CSDO protocol timeout in milliseconds; 1..INT_MAX.
- * @return RT_EOK when queued; otherwise an argument, admission, allocation, or
- *         RT message-queue error. Remote SDO failures are reported in result.
+ * @return RT_EOK when the request enters the global owner queue; otherwise an
+ *         argument, admission, allocation, or RT message-queue error. A later
+ *         per-node FIFO overflow is reported as terminal LOCAL_ERROR/-RT_EBUSY
+ *         in the request result, as are remote/protocol outcomes.
  */
 rt_err_t lely_rtt_runtime_post_sdo_upload(lely_rtt_runtime_t *runtime,
         lely_rtt_sdo_request_t *request, rt_uint8_t node_id,
@@ -983,8 +1025,10 @@ rt_err_t lely_rtt_runtime_post_sdo_upload(lely_rtt_runtime_t *runtime,
  * @param data Bytes to download; copied by the post call.
  * @param size Number of bytes in data; must be non-zero.
  * @param timeout_ms CSDO protocol timeout in milliseconds; 1..INT_MAX.
- * @return RT_EOK when queued; otherwise an argument, admission, allocation, or
- *         RT message-queue error. Remote SDO failures are reported in result.
+ * @return RT_EOK when the request enters the global owner queue; otherwise an
+ *         argument, admission, allocation, or RT message-queue error. A later
+ *         per-node FIFO overflow is reported as terminal LOCAL_ERROR/-RT_EBUSY
+ *         in the request result, as are remote/protocol outcomes.
  */
 rt_err_t lely_rtt_runtime_post_sdo_download(lely_rtt_runtime_t *runtime,
         lely_rtt_sdo_request_t *request, rt_uint8_t node_id,
@@ -1007,8 +1051,10 @@ rt_err_t lely_rtt_runtime_post_sdo_download(lely_rtt_runtime_t *runtime,
  * @param pst CiA 301 block-upload protocol switch threshold; 0 disables the
  *            size-based switch to the regular upload protocol.
  * @param timeout_ms CSDO protocol timeout in milliseconds; 1..INT_MAX.
- * @return RT_EOK when queued; otherwise an argument, admission, allocation, or
- *         RT message-queue error. Remote SDO failures are reported in result.
+ * @return RT_EOK when the request enters the global owner queue; otherwise an
+ *         argument, admission, allocation, or RT message-queue error. A later
+ *         per-node FIFO overflow is reported as terminal LOCAL_ERROR/-RT_EBUSY
+ *         in the request result, as are remote/protocol outcomes.
  */
 rt_err_t lely_rtt_runtime_post_sdo_block_upload(lely_rtt_runtime_t *runtime,
         lely_rtt_sdo_request_t *request, rt_uint8_t node_id,
@@ -1031,8 +1077,10 @@ rt_err_t lely_rtt_runtime_post_sdo_block_upload(lely_rtt_runtime_t *runtime,
  * @param data Bytes to download; copied by the post call.
  * @param size Number of bytes in data; must be non-zero.
  * @param timeout_ms CSDO protocol timeout in milliseconds; 1..INT_MAX.
- * @return RT_EOK when queued; otherwise an argument, admission, allocation, or
- *         RT message-queue error. Remote SDO failures are reported in result.
+ * @return RT_EOK when the request enters the global owner queue; otherwise an
+ *         argument, admission, allocation, or RT message-queue error. A later
+ *         per-node FIFO overflow is reported as terminal LOCAL_ERROR/-RT_EBUSY
+ *         in the request result, as are remote/protocol outcomes.
  */
 rt_err_t lely_rtt_runtime_post_sdo_block_download(lely_rtt_runtime_t *runtime,
         lely_rtt_sdo_request_t *request, rt_uint8_t node_id,

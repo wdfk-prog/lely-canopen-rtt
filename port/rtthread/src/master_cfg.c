@@ -510,7 +510,12 @@ lely_rtt_master_cfg_dispatch(struct lely_rtt_runtime *runtime,
 #endif /* !LELY_NO_CO_NMT_BOOT */
 
 #if defined(PKG_LELY_USING_MASTER_SDO)
-    /* The manual NMT configuration service needs the same predefined SDO pair. */
+    /*
+     * Manual configuration owns the complete node-level configuration boundary.
+     * Cancel predefined/custom application traffic and its pending FIFO even
+     * when a custom CSDO uses different COB-IDs; configuration must not
+     * interleave application writes for the same remote node.
+     */
     lely_rtt_master_sdo_cancel_node(runtime, node_id);
 #endif /* defined(PKG_LELY_USING_MASTER_SDO) */
 

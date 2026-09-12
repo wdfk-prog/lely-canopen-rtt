@@ -101,7 +101,7 @@ remote DCF + master YAML
 
 - 本地/远端 NMT 状态 snapshot 与远端 boot 结果 snapshot；
 - 异步 NMT command；
-- request-object 形式的普通与 block SDO upload/download；
+- request-object 形式的普通与 block SDO upload/download，并支持可选 custom CSDO 与有界 per-node FIFO；
 - 使用 concise DCF 的显式手动 NMT configuration；
 - `0x2000..0x5FFF` 本地 manufacturer OD 访问；
 - 静态 TPDO event 与本地 PDO transmission type 控制；

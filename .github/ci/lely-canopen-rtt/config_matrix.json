@@ -1,0 +1,448 @@
+{
+  "name": "lely-canopen-rtt-stm32f4-combination-matrix",
+  "description": "Representative legal RT-Thread compile profiles for Lely CANopen; not a full Cartesian product.",
+  "package_name": "lely-canopen-rtt",
+  "rtthread": {
+    "repository": "https://github.com/RT-Thread/rt-thread.git",
+    "ref": "master",
+    "env_repository": "https://github.com/RT-Thread/env.git",
+    "env_ref": "master",
+    "bsp": "bsp/stm32/stm32f407-atk-explorer",
+    "stm32_series": "stm32f4"
+  },
+  "feature_sets": {
+    "rt-base": {
+      "RT_USING_HEAP": null,
+      "RT_USING_DEVICE": null,
+      "RT_USING_CAN": null,
+      "RT_USING_EVENT": null,
+      "BSP_USING_CAN": null,
+      "BSP_USING_CAN1": null
+    },
+    "ulog": {
+      "PKG_LELY_USING_ULOG": null,
+      "RT_USING_ULOG": null
+    },
+    "auto-init": {
+      "PKG_LELY_APP_AUTO_INIT": null,
+      "RT_USING_COMPONENTS_INIT": null,
+      "PKG_LELY_CAN_DEV_NAME": "\"can1\"",
+      "PKG_LELY_AUTO_INIT_BITRATE_1000": null,
+      "PKG_LELY_AUTO_INIT_BITRATE": 1000000,
+      "PKG_LELY_AUTO_INIT_RX_BATCH": 8,
+      "PKG_LELY_AUTO_INIT_THREAD_STACK_SIZE": 4096,
+      "PKG_LELY_AUTO_INIT_THREAD_PRIORITY": 5,
+      "PKG_LELY_AUTO_INIT_THREAD_TIMESLICE": 10,
+      "PKG_LELY_AUTO_INIT_START_TIMEOUT_MS": 3000,
+      "PKG_LELY_AUTO_INIT_STOP_TIMEOUT_MS": 3000,
+      "PKG_LELY_AUTO_INIT_START_CONTROLLER": null
+    },
+    "co-default": {
+      "PKG_LELY_USING_CO_CSDO": null,
+      "PKG_LELY_USING_CO_EMCY": null,
+      "PKG_LELY_USING_CO_LSS": null,
+      "PKG_LELY_USING_CO_MASTER": null,
+      "PKG_LELY_USING_CO_NMT_BOOT": null,
+      "PKG_LELY_USING_CO_NMT_CFG": null,
+      "PKG_LELY_USING_CO_RPDO": null,
+      "PKG_LELY_USING_CO_TPDO": null,
+      "PKG_LELY_USING_CO_SYNC": null,
+      "PKG_LELY_USING_CO_TIME": null,
+      "PKG_LELY_USING_CO_MPDO": null,
+      "PKG_LELY_USING_CO_SSDO_BLOCK": null,
+      "PKG_LELY_USING_CO_OBJ_NAME": null,
+      "PKG_LELY_USING_CO_OBJ_LIMITS": null,
+      "PKG_LELY_USING_CO_OBJ_DEFAULT": null,
+      "PKG_LELY_USING_CO_OBJ_UPLOAD": null
+    },
+    "master-command": {
+      "PKG_LELY_USING_CO_CSDO": null,
+      "PKG_LELY_USING_CO_MASTER": null,
+      "PKG_LELY_USING_MASTER_COMMAND": null,
+      "PKG_LELY_MASTER_COMMAND_QUEUE_DEPTH": 8,
+      "RT_USING_MESSAGEQUEUE": null
+    },
+    "finsh-msh": {
+      "RT_USING_FINSH": null,
+      "FINSH_USING_MSH": null
+    },
+    "canfd": {
+      "RT_CAN_USING_CANFD": null,
+      "PKG_LELY_USING_CANFD": null,
+      "PKG_LELY_AUTO_INIT_CANFD": null
+    },
+    "can-hdr-status": {
+      "RT_CAN_USING_HDR": null,
+      "PKG_LELY_AUTO_INIT_STATUS_INDICATION": null
+    },
+    "master-sdo": {
+      "PKG_LELY_USING_MASTER_SDO": null,
+      "PKG_LELY_MASTER_SDO_QUEUE_DEPTH": 4
+    },
+    "master-emcy": {
+      "PKG_LELY_USING_CO_EMCY": null,
+      "PKG_LELY_USING_MASTER_EMCY": null,
+      "PKG_LELY_MASTER_EMCY_HISTORY_DEPTH": 8
+    },
+    "master-time": {
+      "PKG_LELY_USING_CO_TIME": null,
+      "PKG_LELY_USING_MASTER_TIME": null
+    }
+  },
+  "constraints": [
+    {
+      "symbol": "PKG_LELY_USING_CO_MASTER",
+      "requires": [
+        "PKG_LELY_USING_CO_CSDO"
+      ]
+    },
+    {
+      "symbol": "PKG_LELY_USING_CO_NMT_BOOT",
+      "requires": [
+        "PKG_LELY_USING_CO_MASTER"
+      ]
+    },
+    {
+      "symbol": "PKG_LELY_USING_CO_NMT_CFG",
+      "requires": [
+        "PKG_LELY_USING_CO_MASTER",
+        "PKG_LELY_USING_CO_CSDO"
+      ]
+    },
+    {
+      "symbol": "PKG_LELY_EXAMPLE_MASTER_NODE1",
+      "requires": [
+        "PKG_LELY_USING_CO_CSDO",
+        "PKG_LELY_USING_CO_MASTER",
+        "PKG_LELY_USING_CO_NMT_BOOT"
+      ]
+    },
+    {
+      "symbol": "PKG_LELY_USING_MASTER_COMMAND",
+      "requires": [
+        "PKG_LELY_USING_CO_MASTER",
+        "PKG_LELY_MASTER_COMMAND_QUEUE_DEPTH",
+        "RT_USING_MESSAGEQUEUE"
+      ]
+    },
+    {
+      "symbol": "PKG_LELY_USING_MASTER_SDO",
+      "requires": [
+        "PKG_LELY_USING_MASTER_COMMAND",
+        "PKG_LELY_USING_CO_CSDO",
+        "PKG_LELY_MASTER_SDO_QUEUE_DEPTH"
+      ]
+    },
+    {
+      "symbol": "PKG_LELY_USING_MASTER_NMT_CFG",
+      "requires": [
+        "PKG_LELY_USING_MASTER_COMMAND",
+        "PKG_LELY_USING_CO_NMT_CFG"
+      ]
+    },
+    {
+      "symbol": "PKG_LELY_USING_LOCAL_OD",
+      "requires": [
+        "PKG_LELY_USING_MASTER_COMMAND"
+      ]
+    },
+    {
+      "symbol": "PKG_LELY_USING_MASTER_PDO_TX",
+      "requires": [
+        "PKG_LELY_USING_MASTER_COMMAND",
+        "PKG_LELY_USING_LOCAL_OD",
+        "PKG_LELY_USING_CO_TPDO"
+      ]
+    },
+    {
+      "symbol": "PKG_LELY_USING_MASTER_SYNC_PDO",
+      "requires": [
+        "PKG_LELY_USING_MASTER_COMMAND",
+        "PKG_LELY_USING_LOCAL_OD",
+        "PKG_LELY_USING_CO_SYNC",
+        "PKG_LELY_USING_CO_RPDO",
+        "PKG_LELY_USING_CO_TPDO",
+        "PKG_LELY_USING_MASTER_PDO_TX"
+      ]
+    },
+    {
+      "symbol": "PKG_LELY_USING_MASTER_EMCY",
+      "requires": [
+        "PKG_LELY_USING_MASTER_COMMAND",
+        "PKG_LELY_USING_CO_EMCY",
+        "PKG_LELY_MASTER_EMCY_HISTORY_DEPTH"
+      ]
+    },
+    {
+      "symbol": "PKG_LELY_USING_MASTER_TIME",
+      "requires": [
+        "PKG_LELY_USING_MASTER_COMMAND",
+        "PKG_LELY_USING_CO_TIME"
+      ]
+    },
+    {
+      "symbol": "PKG_LELY_USING_MSH",
+      "requires": [
+        "PKG_LELY_APP_AUTO_INIT",
+        "PKG_LELY_EXAMPLE_MASTER_NODE1",
+        "PKG_LELY_USING_CO_MASTER",
+        "PKG_LELY_USING_MASTER_COMMAND",
+        "RT_USING_FINSH",
+        "FINSH_USING_MSH"
+      ]
+    },
+    {
+      "symbol": "PKG_LELY_USING_CANFD",
+      "requires": [
+        "RT_CAN_USING_CANFD"
+      ]
+    },
+    {
+      "symbol": "PKG_LELY_AUTO_INIT_CANFD",
+      "requires": [
+        "PKG_LELY_APP_AUTO_INIT",
+        "PKG_LELY_USING_CANFD",
+        "RT_CAN_USING_CANFD"
+      ]
+    },
+    {
+      "symbol": "PKG_LELY_AUTO_INIT_BRS",
+      "requires": [
+        "PKG_LELY_AUTO_INIT_CANFD"
+      ]
+    },
+    {
+      "symbol": "PKG_LELY_AUTO_INIT_STATUS_INDICATION",
+      "requires": [
+        "PKG_LELY_APP_AUTO_INIT"
+      ]
+    }
+  ],
+  "choices": [
+    {
+      "when": "PKG_LELY_AUTO_INIT_CANFD",
+      "exactly_one": [
+        "PKG_LELY_AUTO_INIT_CANFD_LEN_BYTES",
+        "PKG_LELY_AUTO_INIT_CANFD_LEN_DLC"
+      ]
+    }
+  ],
+  "profiles": [
+    {
+      "name": "minimal-manual",
+      "description": "Manual runtime, no ULOG, and all optional CANopen feature switches disabled.",
+      "use": [
+        "rt-base"
+      ],
+      "expect_sources": [
+        "port/rtthread/src/runtime.c"
+      ],
+      "forbid_sources": [
+        "port/rtthread/src/auto_init.c",
+        "port/rtthread/src/master_command.c",
+        "upstream/src/co/csdo.c",
+        "upstream/src/co/emcy.c",
+        "upstream/src/co/lss.c",
+        "upstream/src/co/nmt_boot.c",
+        "upstream/src/co/nmt_cfg.c",
+        "upstream/src/co/rpdo.c",
+        "upstream/src/co/sync.c",
+        "upstream/src/co/time.c",
+        "upstream/src/co/tpdo.c"
+      ]
+    },
+    {
+      "name": "default-classic",
+      "description": "Kconfig-default classic CAN profile with ULOG and automatic runtime creation.",
+      "use": [
+        "rt-base",
+        "ulog",
+        "auto-init",
+        "co-default"
+      ],
+      "expect_sources": [
+        "port/rtthread/src/auto_init.c",
+        "upstream/src/co/csdo.c",
+        "upstream/src/co/emcy.c",
+        "upstream/src/co/nmt_boot.c",
+        "upstream/src/co/nmt_cfg.c",
+        "upstream/src/co/rpdo.c",
+        "upstream/src/co/sync.c",
+        "upstream/src/co/time.c",
+        "upstream/src/co/tpdo.c"
+      ]
+    },
+    {
+      "name": "master-sdo-nmtcfg",
+      "description": "Manual Master control plane with asynchronous Client-SDO and manual NMT configuration.",
+      "use": [
+        "rt-base",
+        "master-command",
+        "master-sdo"
+      ],
+      "define": {
+        "PKG_LELY_USING_CO_NMT_CFG": null,
+        "PKG_LELY_USING_MASTER_NMT_CFG": null
+      },
+      "expect_sources": [
+        "port/rtthread/src/master_command.c",
+        "port/rtthread/src/master_sdo.c",
+        "port/rtthread/src/master_sdo_request.c",
+        "port/rtthread/src/master_sdo_client.c",
+        "port/rtthread/src/master_cfg.c",
+        "upstream/src/co/csdo.c",
+        "upstream/src/co/nmt_cfg.c"
+      ],
+      "forbid_sources": [
+        "port/rtthread/src/auto_init.c"
+      ]
+    },
+    {
+      "name": "master-sync-pdo",
+      "description": "Manual Master local-OD bridge with event TPDO and synchronous RPDO/TPDO control.",
+      "use": [
+        "rt-base",
+        "master-command"
+      ],
+      "define": {
+        "PKG_LELY_USING_CO_RPDO": null,
+        "PKG_LELY_USING_CO_TPDO": null,
+        "PKG_LELY_USING_CO_SYNC": null,
+        "PKG_LELY_USING_LOCAL_OD": null,
+        "PKG_LELY_USING_MASTER_PDO_TX": null,
+        "PKG_LELY_USING_MASTER_SYNC_PDO": null
+      },
+      "expect_sources": [
+        "port/rtthread/src/master_od.c",
+        "port/rtthread/src/master_pdo.c",
+        "port/rtthread/src/master_sync.c",
+        "upstream/src/co/rpdo.c",
+        "upstream/src/co/sync.c",
+        "upstream/src/co/tpdo.c"
+      ]
+    },
+    {
+      "name": "master-emcy-time",
+      "description": "Manual Master control plane with EMCY history/local operations and CANopen TIME bridge.",
+      "use": [
+        "rt-base",
+        "master-command",
+        "master-emcy",
+        "master-time"
+      ],
+      "expect_sources": [
+        "port/rtthread/src/master_emcy.c",
+        "port/rtthread/src/master_time.c",
+        "upstream/src/co/emcy.c",
+        "upstream/src/co/time.c"
+      ]
+    },
+    {
+      "name": "full-msh-example",
+      "description": "Auto-init Master+Node1 example with all application bridges and their MSH commands enabled together.",
+      "use": [
+        "rt-base",
+        "ulog",
+        "auto-init",
+        "co-default",
+        "master-command",
+        "finsh-msh",
+        "master-sdo",
+        "master-emcy",
+        "master-time"
+      ],
+      "define": {
+        "PKG_LELY_EXAMPLE_MASTER_NODE1": null,
+        "PKG_LELY_USING_MASTER_NMT_CFG": null,
+        "PKG_LELY_USING_LOCAL_OD": null,
+        "PKG_LELY_USING_MASTER_PDO_TX": null,
+        "PKG_LELY_USING_MASTER_SYNC_PDO": null,
+        "PKG_LELY_USING_MSH": null
+      },
+      "expect_sources": [
+        "port/rtthread/src/auto_init.c",
+        "port/rtthread/src/master_sdo.c",
+        "port/rtthread/src/master_cfg.c",
+        "port/rtthread/src/master_od.c",
+        "port/rtthread/src/master_pdo.c",
+        "port/rtthread/src/master_sync.c",
+        "port/rtthread/src/master_emcy.c",
+        "port/rtthread/src/master_time.c",
+        "port/rtthread/src/msh.c",
+        "port/rtthread/src/msh/msh_cfg.c",
+        "port/rtthread/src/msh/msh_od.c",
+        "port/rtthread/src/msh/msh_pdo.c",
+        "port/rtthread/src/msh/msh_emcy.c",
+        "port/rtthread/src/msh/msh_time.c",
+        "port/rtthread/src/msh/msh_sdo.c",
+        "examples/master_node1/master_sdev.c",
+        "examples/master_node1/master_cfg_dcf.c"
+      ]
+    },
+    {
+      "name": "classic-hdr-status",
+      "description": "Classic CAN auto-init with RT-Thread CAN header filtering and status indication callback enabled.",
+      "use": [
+        "rt-base",
+        "auto-init",
+        "co-default",
+        "can-hdr-status"
+      ],
+      "undefine": [
+        "PKG_LELY_AUTO_INIT_START_CONTROLLER"
+      ],
+      "expect_sources": [
+        "port/rtthread/src/auto_init.c"
+      ]
+    },
+    {
+      "name": "canfd-bytes",
+      "description": "CAN FD compile profile using payload-byte rt_can_msg.len semantics.",
+      "use": [
+        "rt-base",
+        "auto-init",
+        "co-default",
+        "canfd"
+      ],
+      "define": {
+        "PKG_LELY_AUTO_INIT_CANFD_LEN_BYTES": null
+      },
+      "expect_sources": [
+        "port/rtthread/src/auto_init.c",
+        "port/rtthread/src/can.c"
+      ]
+    },
+    {
+      "name": "canfd-dlc-brs",
+      "description": "CAN FD compile profile using raw-DLC rt_can_msg.len semantics with bit-rate switching.",
+      "use": [
+        "rt-base",
+        "auto-init",
+        "co-default",
+        "canfd"
+      ],
+      "define": {
+        "PKG_LELY_AUTO_INIT_BRS": null,
+        "PKG_LELY_AUTO_INIT_CANFD_LEN_DLC": null
+      },
+      "expect_sources": [
+        "port/rtthread/src/auto_init.c",
+        "port/rtthread/src/can.c"
+      ]
+    },
+    {
+      "name": "node-guarding",
+      "description": "Default classic CAN services plus the non-default CiA 301 node-guarding feature branch.",
+      "use": [
+        "rt-base",
+        "co-default"
+      ],
+      "define": {
+        "PKG_LELY_USING_CO_NODE_GUARDING": null
+      },
+      "forbid_sources": [
+        "port/rtthread/src/auto_init.c"
+      ]
+    }
+  ]
+}

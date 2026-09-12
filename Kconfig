@@ -239,13 +239,27 @@ config PKG_LELY_USING_MASTER_SDO
     help
         Add request-id based SDO upload/download transactions for remote nodes,
         including explicit application cancellation and Client-SDO block
-        upload/download. The owner lazily creates one application-owned
-        Client-SDO per Node-ID
-        using the CiA 301 predefined SDO connection. It never borrows the NMT
-        boot Client-SDO. At most one application transaction may be active per
-        remote node.
+        upload/download. By default the owner lazily creates one independent
+        CiA 301 predefined Client-SDO per Node-ID so application traffic never
+        borrows the NMT boot Client-SDO. Applications may instead bind a node
+        to an existing custom 0x1280..0x12FF Client-SDO before runtime start.
+        One transaction is active per node while additional requests wait in a
+        bounded per-node FIFO. Different remote nodes may execute concurrently.
         Protocol timeout, abort code, completion and shutdown cancellation are
         preserved.
+
+config PKG_LELY_MASTER_SDO_QUEUE_DEPTH
+    int "Per-node pending Master SDO queue depth"
+    depends on PKG_LELY_USING_MASTER_SDO
+    range 1 16
+    default 4
+    help
+        Maximum application SDO requests retained in the owner-only FIFO behind
+        the one active request for each remote Node-ID. This queue is separate
+        from the Master command queue: a post must first enter the global owner
+        command queue, then owner dispatch either starts it immediately or
+        appends it here. A full per-node FIFO completes the request with a local
+        busy error instead of silently dropping it.
 
 config PKG_LELY_USING_MASTER_NMT_CFG
     bool "Enable manual Master NMT configuration requests"
