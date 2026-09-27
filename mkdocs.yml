@@ -1,0 +1,54 @@
+site_name: Lely CANopen RT-Thread
+site_description: RT-Thread integration package for Lely CANopen
+site_url: https://wdfk-prog.github.io/lely-canopen-rtt/
+repo_url: https://github.com/wdfk-prog/lely-canopen-rtt
+repo_name: wdfk-prog/lely-canopen-rtt
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - content.code.copy
+
+nav:
+  - Home: index.md
+  - English:
+      - "Overview": en/index.md
+      - "Quick start": en/quick-start.md
+      - "RT-Thread integration": en/rt-thread-integration.md
+      - "Configuration": en/configuration.md
+      - "Object Dictionary": en/object-dictionary.md
+      - "Host generation": en/host-generation.md
+      - "Master control plane": en/master-control-plane.md
+      - "Upstream maintenance": en/upstream-maintenance.md
+      - "Troubleshooting": en/troubleshooting.md
+  - 中文:
+      - "文档首页": zh/index.md
+      - "快速接入": zh/quick-start.md
+      - "RT-Thread 集成": zh/rt-thread-integration.md
+      - "配置说明": zh/configuration.md
+      - "对象字典": zh/object-dictionary.md
+      - "Host 生成工具链": zh/host-generation.md
+      - "Master 控制面": zh/master-control-plane.md
+      - "Upstream 维护": zh/upstream-maintenance.md
+      - "问题排查": zh/troubleshooting.md
+  - API Reference: https://wdfk-prog.github.io/lely-canopen-rtt/api/
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight
+
+plugins:
+  - search
+
+validation:
+  nav:
+    not_found: warn
+  links:
+    not_found: info
+    anchors: info
