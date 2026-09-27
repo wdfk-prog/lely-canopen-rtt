@@ -37,11 +37,19 @@ nav:
       - "问题排查": zh/troubleshooting.md
   - API Reference: https://wdfk-prog.github.io/lely-canopen-rtt/api/
 
+exclude_docs: |
+  /doxygen-mainpage.md
+
 markdown_extensions:
   - admonition
   - pymdownx.details
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.highlight
+  - tables
 
 plugins:
   - search

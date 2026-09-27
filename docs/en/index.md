@@ -30,5 +30,5 @@
 
 ## Repository entry pages
 
-- [English README](../../README.md)
-- [中文 README](../../README.zh-CN.md)
+- [English README](https://github.com/wdfk-prog/lely-canopen-rtt/blob/main/README.md)
+- [中文 README](https://github.com/wdfk-prog/lely-canopen-rtt/blob/main/README.zh-CN.md)
