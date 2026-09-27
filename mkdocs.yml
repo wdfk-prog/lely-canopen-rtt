@@ -14,7 +14,7 @@ theme:
     - content.code.copy
 
 nav:
-  - Home: index.md
+  - Home: README.md
   - English:
       - "Overview": en/index.md
       - "Quick start": en/quick-start.md
